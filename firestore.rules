@@ -1,0 +1,194 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ----------------------------------------------------
+    // GLOBAL REUSABLE SECURITY HELPERS
+    // ----------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && (
+        request.auth.token.email_verified == true || 
+        request.auth.token.email == "pawan.kummar16@gmail.com"
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "pawan.kummar16@gmail.com" ||
+        (exists(/databases/$(database)/documents/mfr_users/$(request.auth.uid)) &&
+         get(/databases/$(database)/documents/mfr_users/$(request.auth.uid)).data.role == "admin")
+      );
+    }
+
+    // ----------------------------------------------------
+    // ENTITY VALIDATION HELPERS (Anti-Update-Gap Schema Checkers)
+    // ----------------------------------------------------
+    function isValidUserProfile(data) {
+      return data.keys().hasAll(['userId', 'name', 'email', 'pin', 'department', 'role', 'active', 'createdAt']) &&
+        data.keys().size() == 8 &&
+        data.userId is string && data.userId.size() <= 128 &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        data.email is string && data.email.size() > 0 && data.email.size() <= 100 &&
+        data.pin is string && data.pin.size() == 4 &&
+        data.department is string && data.department.size() <= 30 &&
+        data.role is string && (data.role == 'admin' || data.role == 'staff') &&
+        data.active is bool &&
+        data.createdAt is string;
+    }
+
+    function isValidJobCard(data) {
+      return data.keys().hasAll(['jobCardNo', 'orderNo', 'partyName', 'itemName', 'itemCode', 'orderQty', 'currentQty', 'balanceQty', 'currentDepartment', 'status', 'heatTreatmentRequired', 'createdBy', 'createdAt', 'completed']) &&
+        data.keys().size() >= 14 &&
+        data.jobCardNo is string && data.jobCardNo.size() <= 32 &&
+        data.orderNo is string && data.orderNo.size() <= 32 &&
+        data.partyName is string && data.partyName.size() > 0 && data.partyName.size() <= 200 &&
+        data.itemName is string && data.itemName.size() > 0 && data.itemName.size() <= 200 &&
+        data.itemCode is string && data.itemCode.size() > 0 && data.itemCode.size() <= 100 &&
+        data.orderQty is number && data.orderQty >= 0 &&
+        data.currentQty is number && data.currentQty >= 0 &&
+        data.balanceQty is number && data.balanceQty >= 0 &&
+        data.currentDepartment is string &&
+        data.status is string &&
+        data.heatTreatmentRequired is bool &&
+        data.createdBy is string && data.createdBy.size() <= 128 &&
+        data.createdAt is string &&
+        data.completed is bool;
+    }
+
+    function isValidMaterialMovement(data) {
+      return data.keys().hasAll(['movementId', 'jobCardNo', 'fromDepartment', 'toDepartment', 'quantity', 'transferBy', 'transferDate', 'accepted']) &&
+        data.keys().size() >= 8 &&
+        data.movementId is string && data.movementId.size() <= 32 &&
+        data.jobCardNo is string && data.jobCardNo.size() <= 32 &&
+        data.fromDepartment is string &&
+        data.toDepartment is string &&
+        data.quantity is number && data.quantity > 0 && data.quantity <= 1000000 &&
+        data.transferBy is string && data.transferBy.size() <= 100 &&
+        data.transferDate is string &&
+        data.accepted is bool;
+    }
+
+    function isValidAppNotification(data) {
+      return data.keys().hasAll(['notificationId', 'userId', 'title', 'message', 'read', 'createdAt']) &&
+        data.keys().size() >= 6 &&
+        data.notificationId is string && data.notificationId.size() <= 50 &&
+        data.userId is string && data.userId.size() <= 128 &&
+        data.title is string && data.title.size() <= 200 &&
+        data.message is string && data.message.size() <= 1000 &&
+        data.read is bool &&
+        data.createdAt is string;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['id', 'timestamp', 'userId', 'userName', 'action', 'details']) &&
+        data.keys().size() >= 6 &&
+        data.id is string && data.id.size() <= 50 &&
+        data.timestamp is string &&
+        data.userId is string && data.userId.size() <= 128 &&
+        data.userName is string && data.userName.size() <= 100 &&
+        data.action is string && data.action.size() <= 100 &&
+        data.details is string && data.details.size() <= 1000;
+    }
+
+    function isValidCompanyConfig(data) {
+      return data.keys().hasAll(['companyName', 'details']) &&
+        data.companyName is string && data.companyName.size() > 0 && data.companyName.size() <= 200 &&
+        data.details is string && data.details.size() > 0 && data.details.size() <= 1000;
+    }
+
+    // ----------------------------------------------------
+    // RESOURCE CORNERSTONES
+    // ----------------------------------------------------
+
+    // Collection: Users Profiles
+    match /mfr_users/{userId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && resource.data.active == true;
+      allow create: if isVerified() && isValidId(userId) && request.auth.uid == userId && isValidUserProfile(incoming()) && incoming().role == 'staff';
+      allow update: if isVerified() && isValidUserProfile(incoming()) && (
+        (request.auth.uid == userId && incoming().role == existing().role && incoming().department == existing().department && incoming().active == existing().active && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'email', 'pin'])) || 
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Collection: Manufacturing Job Cards
+    match /mfr_job_cards/{jobCardNo} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isVerified() && isValidId(jobCardNo) && isValidJobCard(incoming()) && (
+        isAdmin() || 
+        (exists(/databases/$(database)/documents/mfr_users/$(request.auth.uid)) && get(/databases/$(database)/documents/mfr_users/$(request.auth.uid)).data.department == 'Dispatch')
+      );
+      allow update: if isVerified() && isValidJobCard(incoming()) && (
+        isAdmin() ||
+        (
+          existing().completed == false && (
+            // standard progress department updates
+            incoming().diff(existing()).affectedKeys().hasAny(['status', 'currentDepartment', 'currentQty', 'balanceQty', 'completed', 'operatorName', 'heatTreatmentDetails', 'platingDetails', 'packingDetails', 'storeDetails', 'dispatchDetails'])
+          )
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Collection: Material Movements
+    match /mfr_movements/{movementId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isVerified() && isValidId(movementId) && isValidMaterialMovement(incoming()) && 
+        exists(/databases/$(database)/documents/mfr_job_cards/$(incoming().jobCardNo));
+      allow update: if isVerified() && isValidMaterialMovement(incoming()) && (
+        isAdmin() || 
+        incoming().diff(existing()).affectedKeys().hasAny(['accepted', 'acceptedBy', 'acceptedDate', 'remarks'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Collection: Application Notifications
+    match /mfr_notifications/{notificationId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || resource.data.department == 'All' || exists(/databases/$(database)/documents/mfr_users/$(request.auth.uid)));
+      allow create: if isVerified() && isValidId(notificationId) && isValidAppNotification(incoming());
+      allow update: if isSignedIn() && incoming().diff(existing()).affectedKeys().hasOnly(['read']) && 
+        (existing().userId == request.auth.uid || existing().userId.startsWith('all_'));
+      allow delete: if isAdmin();
+    }
+
+    // Collection: Audit Log (Write-Once / Absolute Immutability)
+    match /mfr_audit_logs/{logId} {
+      allow get: if isAdmin();
+      allow list: if isAdmin();
+      allow create: if isVerified() && isValidId(logId) && isValidAuditLog(incoming()) && incoming().userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // Collection: Company Configuration (Singleton Config)
+    match /mfr_company_config/{configId} {
+      allow read: if isSignedIn();
+      allow create, update: if isVerified() && isValidId(configId) && isValidCompanyConfig(incoming()) && isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}

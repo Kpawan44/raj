@@ -1,0 +1,10 @@
+{
+  "name": "Remix: Manufacturing Production Tracking System",
+  "description": "Enterprise-grade manufacturing workflow tracker to manage job cards, real-time material movements, balance quantities, and notifications across departments.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
