@@ -24,7 +24,7 @@ import {
   Trash2
 } from 'lucide-react';
 import { DBService, auth } from './lib/firebase';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig } from './types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus } from './types';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getSpreadsheetDetails, 
@@ -108,7 +108,7 @@ export default function App() {
 
       setSelectedJob(prev => {
         if (!prev) return null;
-        const freshJob = jc.find(j => j.jobCardNo === prev.jobCardNo);
+        const freshJob = jc.find(j => j.jobCardNo.toLowerCase() === prev.jobCardNo.toLowerCase());
         return freshJob || prev;
       });
 
@@ -123,7 +123,7 @@ export default function App() {
       const urlParams = new URLSearchParams(window.location.search);
       const queryJobCardNo = urlParams.get('jobCardNo');
       if (queryJobCardNo && jc.length > 0) {
-        const foundJob = jc.find(j => j.jobCardNo === queryJobCardNo);
+        const foundJob = jc.find(j => j.jobCardNo.toLowerCase() === queryJobCardNo.toLowerCase());
         if (foundJob) {
           setSelectedJob(foundJob);
           // Clean up query param from browser address bar smoothly
@@ -290,6 +290,43 @@ export default function App() {
     }
   };
 
+  const handleCreateSubJob = async (parentJob: JobCard) => {
+    if (!currentUser) return;
+    
+    // Calculate pending quantity
+    const totalMovedQty = movements.filter(m => m.jobCardNo.toLowerCase() === parentJob.jobCardNo.toLowerCase()).reduce((acc, curr) => acc + curr.quantity, 0);
+    const pendingQty = parentJob.orderQty - totalMovedQty;
+    
+    if (pendingQty <= 0) {
+      alert("No pending quantity to split.");
+      return;
+    }
+
+    if (!confirm(`Create new sub-job for ${pendingQty} KG from ${parentJob.jobCardNo}?`)) return;
+
+    // Create the new sub job based on parent job details
+    const subJob = {
+      partyName: parentJob.partyName,
+      itemName: parentJob.itemName,
+      itemCode: parentJob.itemCode,
+      orderQty: pendingQty,
+      currentQty: pendingQty,
+      currentDepartment: 'Production' as Department,
+      status: 'Pending' as JobCardStatus,
+      heatTreatmentRequired: parentJob.heatTreatmentRequired,
+      createdBy: currentUser.name,
+      // ...other fields if needed
+    };
+
+    try {
+      await DBService.createJobCard(subJob, currentUser.userId, currentUser.name);
+      alert(`Sub-Job successfully created for ${pendingQty} KG!`);
+      refreshAllStates();
+    } catch (err: any) {
+      alert(`Failed to create Sub-Job: ${err.message}`);
+    }
+  };
+
   const handleCreateJobCard = async (job: any) => {
     if (!currentUser) return;
     console.log("Creating job card:", job);
@@ -363,7 +400,7 @@ export default function App() {
   };
 
   const handleSelectJobByNo = (jobNo: string) => {
-    const found = jobCards.find(j => j.jobCardNo === jobNo);
+    const found = jobCards.find(j => j.jobCardNo.toLowerCase() === jobNo.toLowerCase());
     if (found) {
       setSelectedJob(found);
     }
@@ -430,7 +467,7 @@ export default function App() {
   // --- ATTACHMENTS MANAGER ---
   const handleUploadAttachment = async (jobCardNo: string, file: any) => {
     const updatedCards = [...jobCards];
-    const idx = updatedCards.findIndex(c => c.jobCardNo === jobCardNo);
+    const idx = updatedCards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
     if (idx >= 0) {
       const card = updatedCards[idx];
       const files = (card as any).attachments || [];
@@ -451,7 +488,7 @@ export default function App() {
 
   const handleDeleteAttachment = async (jobCardNo: string, index: number) => {
     const updatedCards = [...jobCards];
-    const idx = updatedCards.findIndex(c => c.jobCardNo === jobCardNo);
+    const idx = updatedCards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
     if (idx >= 0) {
       const card = updatedCards[idx];
       const files = (card as any).attachments || [];
@@ -972,6 +1009,8 @@ export default function App() {
                           <th className="py-3 px-3">Party Name</th>
                           <th className="py-3 px-3">Item Details</th>
                           <th className="py-3 px-3">Target (KG)</th>
+                          <th className="py-3 px-3">Pending (KG)</th>
+                          <th className="py-3 px-3">Action</th>
                           
                           {/* Production Stage columns */}
                           <th className="py-3 px-2 bg-blue-50/55 dark:bg-blue-950/25 text-blue-800 dark:text-blue-300 font-bold border-x border-slate-200/50 dark:border-slate-800/40 text-center">Recv (PROD)</th>
@@ -1009,6 +1048,17 @@ export default function App() {
                                 <span className="text-[9px] font-mono text-slate-400">{j.itemCode}</span>
                               </td>
                               <td className="py-3 px-3 font-mono font-bold">{j.orderQty.toLocaleString()}</td>
+                              <td className="py-3 px-3 font-mono font-bold">{(j.orderQty - movements.filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase()).reduce((acc, curr) => acc + curr.quantity, 0)).toLocaleString()}</td>
+                              <td className="py-3 px-3">
+                                {j.orderQty - movements.filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase()).reduce((acc, curr) => acc + curr.quantity, 0) > 0 && (
+                                  <button
+                                    onClick={() => handleCreateSubJob(j)}
+                                    className="px-2 py-1 bg-amber-100 dark:bg-amber-900 text-amber-800 dark:text-amber-200 rounded text-[9px] font-bold uppercase hover:bg-amber-200"
+                                  >
+                                    Create Sub-Job
+                                  </button>
+                                )}
+                              </td>
                               
                               {/* Production values */}
                               <td className="py-3 px-2 bg-blue-50/10 dark:bg-blue-950/10 font-mono font-bold text-blue-700 dark:text-blue-400 border-x border-slate-200/30 text-center">{m.qtyReceivedFromProd.toLocaleString()}</td>
@@ -1183,7 +1233,7 @@ export default function App() {
                   {jobCards.length > 0 && (
                     <TimelineVisual 
                       jobCard={jobCards[0]} 
-                      movements={movements.filter(m => m.jobCardNo === jobCards[0].jobCardNo)} 
+                      movements={movements.filter(m => m.jobCardNo.toLowerCase() === jobCards[0].jobCardNo.toLowerCase())} 
                     />
                   )}
                 </div>

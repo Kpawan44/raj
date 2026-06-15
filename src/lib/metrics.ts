@@ -2,7 +2,7 @@ import { JobCard, MaterialMovement } from '../types';
 
 export function getJobCardProcessMetrics(j: JobCard, movementsList: MaterialMovement[]) {
   // Filter movements for this job card
-  const cardMovements = movementsList.filter(m => m.jobCardNo === j.jobCardNo);
+  const cardMovements = movementsList.filter(m => m.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase());
   const acceptedMovements = cardMovements.filter(m => m.accepted);
 
   // --- PRODUCTION / HEAT TREATMENT ---> PLATING

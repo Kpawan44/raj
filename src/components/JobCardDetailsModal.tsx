@@ -68,7 +68,7 @@ export default function JobCardDetailsModal({
   };
 
   // Filter movements for this specific job card
-  const filteredMovements = movements.filter(m => m.jobCardNo === jobCard.jobCardNo);
+  const filteredMovements = movements.filter(m => m.jobCardNo.toLowerCase() === jobCard.jobCardNo.toLowerCase());
   const m = getJobCardProcessMetrics(jobCard, movements);
 
   // File Upload Handlers (Drag & Drop + Input Click)

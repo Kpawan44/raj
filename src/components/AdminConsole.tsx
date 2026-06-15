@@ -72,18 +72,16 @@ export default function AdminConsole({
       return;
     }
 
-    if (!newUserName || !newUserPin) return;
+    if (!newUserName) return;
 
-    if (newUserPin.length !== 4) {
-      setPinError('PIN must be exactly 4 digits.');
-      return;
-    }
+    // Auto-generate a secure 4-digit PIN under the hood for backend compatibility
+    const generatedPin = Math.floor(1000 + Math.random() * 9000).toString();
 
     const newProfile: UserProfile = {
       userId: `u-${Math.floor(Math.random() * 9000) + 1000}`,
       name: newUserName,
       email: `${newUserName.toLowerCase().replace(/\s+/g, '')}@factory.com`,
-      pin: newUserPin,
+      pin: generatedPin,
       department: newUserDept,
       role: newUserRole,
       active: true,
@@ -277,7 +275,7 @@ export default function AdminConsole({
           </h4>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-            <div>
+            <div className="col-span-1 md:col-span-2">
               <label className="block text-slate-400 font-medium mb-1">Full Name</label>
               <input
                 type="text"
@@ -286,22 +284,6 @@ export default function AdminConsole({
                 value={newUserName}
                 onChange={e => setNewUserName(e.target.value)}
                 className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6] focus:ring-1 focus:ring-[#3B82F6]/25"
-              />
-            </div>
-            
-            <div>
-              <label className="block text-slate-400 font-medium mb-1">4-Digit Security PIN</label>
-              <input
-                type="password"
-                maxLength={4}
-                placeholder="e.g. 1234"
-                required
-                value={newUserPin}
-                onChange={e => {
-                  setNewUserPin(e.target.value.replace(/\D/g, ''));
-                  setPinError('');
-                }}
-                className="w-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2 text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6] focus:ring-1 focus:ring-[#3B82F6]/25 font-mono tracking-widest text-center"
               />
             </div>
 

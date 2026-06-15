@@ -59,7 +59,7 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
     console.log("ReportView: total jobCards loaded =", jobCards.length);
     if (jobCards.length > 0) {
         console.log("First job card:", jobCards[0]);
-        const found = jobCards.find(jc => jc.jobCardNo === 'jc-1001');
+        const found = jobCards.find(jc => jc.jobCardNo.toLowerCase() === 'jc-1001');
         console.log("jc-1001 found in jobCards?", !!found);
     }
     let baseData: any[] = [];
@@ -208,7 +208,7 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
         break;
       case 'movements':
         baseData = movements.map(m => {
-          const matchedCard = jobCards.find(jc => jc.jobCardNo === m.jobCardNo);
+          const matchedCard = jobCards.find(jc => jc.jobCardNo.toLowerCase() === m.jobCardNo.toLowerCase());
           return {
             movementId: m.movementId,
             jobCardNo: m.jobCardNo,

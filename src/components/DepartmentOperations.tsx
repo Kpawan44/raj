@@ -153,12 +153,17 @@ export default function DepartmentOperations({
   const handleCompleteProduction = (jCard: JobCard) => {
     if (!prodOpName || prodQty <= 0) return;
 
+    const totalMovedFromProdBefore = movements
+      .filter(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
+      .reduce((sum, m) => sum + m.quantity, 0);
+    const totalProducedIncludingCurrent = totalMovedFromProdBefore + prodQty;
+
     // Update job card specs
     onUpdateJobCard(jCard.jobCardNo, {
       operatorName: prodOpName,
       currentQty: prodQty,
-      // Formula: Balance = Order Qty - Processed Qty
-      balanceQty: Math.max(0, jCard.orderQty - prodQty)
+      // Formula: Balance = Order Qty - Overall Processed Qty
+      balanceQty: Math.max(0, jCard.orderQty - totalProducedIncludingCurrent)
     });
 
     // Determine target department
@@ -182,17 +187,30 @@ export default function DepartmentOperations({
   const handleCompleteHeatTreatment = (jCard: JobCard) => {
     const receivedFromProd = htQtyReceived;
     const sentToPlating = htQtySentToPlating;
+
+    if (sentToPlating > receivedFromProd) {
+      alert(`Error: Sent quantity (${sentToPlating} KG) cannot exceed the received quantity (${receivedFromProd} KG).`);
+      return;
+    }
+    if (sentToPlating + htRejectionQty > receivedFromProd) {
+      alert(`Error: Combined sent quantity (${sentToPlating} KG) and rejection quantity (${htRejectionQty} KG) cannot exceed the received quantity (${receivedFromProd} KG).`);
+      return;
+    }
+
     const remainingQty = Math.max(0, receivedFromProd - sentToPlating - htRejectionQty);
 
+    const prevHT = jCard.heatTreatmentDetails;
+    const totalRejectionInHT = (prevHT?.rejectionQty || 0) + htRejectionQty;
     onUpdateJobCard(jCard.jobCardNo, {
-      customRoutedToPlating: sentToPlating,
+      customRoutedToPlating: (jCard.customRoutedToPlating || 0) + sentToPlating,
+      balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - htRejectionQty),
       heatTreatmentDetails: {
         hardnessRequired: htHardness,
         temperature: htTemp,
         cycleTime: htDuration,
-        rejectionQty: htRejectionQty,
-        qtyReceivedFromProd: receivedFromProd,
-        qtySentToPlating: sentToPlating,
+        rejectionQty: totalRejectionInHT,
+        qtyReceivedFromProd: (prevHT?.qtyReceivedFromProd || 0) + receivedFromProd,
+        qtySentToPlating: (prevHT?.qtySentToPlating || 0) + sentToPlating,
         qtyRemaining: remainingQty
       }
     });
@@ -214,17 +232,30 @@ export default function DepartmentOperations({
   const handleCompletePlating = (jCard: JobCard) => {
     const receivedFromHt = platingQtyReceived;
     const sentToPacking = platingQtySentToPacking;
+
+    if (sentToPacking > receivedFromHt) {
+      alert(`Error: Sent quantity (${sentToPacking} KG) cannot exceed the received quantity (${receivedFromHt} KG).`);
+      return;
+    }
+    if (sentToPacking + platingRejectionQty > receivedFromHt) {
+      alert(`Error: Combined sent quantity (${sentToPacking} KG) and rejection quantity (${platingRejectionQty} KG) cannot exceed the received quantity (${receivedFromHt} KG).`);
+      return;
+    }
+
     const remainingQty = Math.max(0, receivedFromHt - sentToPacking - platingRejectionQty);
 
+    const prevPlating = jCard.platingDetails;
+    const totalRejectionInPlating = (prevPlating?.rejectionQty || 0) + platingRejectionQty;
     onUpdateJobCard(jCard.jobCardNo, {
-      customRoutedToPacking: sentToPacking,
+      customRoutedToPacking: (jCard.customRoutedToPacking || 0) + sentToPacking,
+      balanceQty: Math.max(0, (jCard.balanceQty ?? jCard.orderQty) - platingRejectionQty),
       platingDetails: {
         platingType,
         micronThickness: platingThick,
         durationMinutes: platingDur,
-        rejectionQty: platingRejectionQty,
-        qtyReceivedFromHt: receivedFromHt,
-        qtySentToPacking: sentToPacking,
+        rejectionQty: totalRejectionInPlating,
+        qtyReceivedFromHt: (prevPlating?.qtyReceivedFromHt || 0) + receivedFromHt,
+        qtySentToPacking: (prevPlating?.qtySentToPacking || 0) + sentToPacking,
         qtyRemaining: remainingQty
       }
     });
@@ -246,21 +277,39 @@ export default function DepartmentOperations({
   const handleCompletePacking = (jCard: JobCard) => {
     const receivedFromPlating = packQtyReceived;
     const sentToStore = packQtySentToStore;
+
+    if (sentToStore > receivedFromPlating) {
+      alert(`Error: Sent quantity (${sentToStore} KG) cannot exceed the received quantity (${receivedFromPlating} KG).`);
+      return;
+    }
+    if (sentToStore + packRejectionQty > receivedFromPlating) {
+      alert(`Error: Combined sent quantity (${sentToStore} KG) and rejection quantity (${packRejectionQty} KG) cannot exceed the received quantity (${receivedFromPlating} KG).`);
+      return;
+    }
+
     const remainingQty = Math.max(0, receivedFromPlating - sentToStore - packRejectionQty);
 
+    const prevPacking = jCard.packingDetails;
+    const totalPackedIncludingCurrent = (prevPacking?.qtySentToStore || 0) + sentToStore;
+
+    const htRejectionTotal = jCard.heatTreatmentDetails?.rejectionQty || 0;
+    const platingRejectionTotal = jCard.platingDetails?.rejectionQty || 0;
+    const packingRejectionTotal = (prevPacking?.rejectionQty || 0) + packRejectionQty;
+    const totalRejections = htRejectionTotal + platingRejectionTotal + packingRejectionTotal;
+
     onUpdateJobCard(jCard.jobCardNo, {
-      customRoutedToStore: sentToStore,
+      customRoutedToStore: (jCard.customRoutedToStore || 0) + sentToStore,
       packingDetails: {
-        packedQty: sentToStore,
-        boxCount: packBoxCount,
+        packedQty: totalPackedIncludingCurrent,
+        boxCount: (prevPacking?.boxCount || 0) + packBoxCount,
         packingType: packStyle,
-        rejectionQty: packRejectionQty,
-        qtyReceivedFromPlating: receivedFromPlating,
-        qtySentToStore: sentToStore,
+        rejectionQty: packingRejectionTotal,
+        qtyReceivedFromPlating: (prevPacking?.qtyReceivedFromPlating || 0) + receivedFromPlating,
+        qtySentToStore: totalPackedIncludingCurrent,
         qtyRemaining: remainingQty
       },
       currentQty: sentToStore,
-      balanceQty: Math.max(0, jCard.orderQty - sentToStore)
+      balanceQty: Math.max(0, jCard.orderQty - totalPackedIncludingCurrent - totalRejections)
     });
 
     onCreateMovement({
@@ -268,7 +317,7 @@ export default function DepartmentOperations({
       fromDepartment: 'Packing',
       toDepartment: 'Store',
       quantity: sentToStore,
-      remarks: `Packed in ${packBoxCount} boxes. Quality verified. Recv from Plating: ${receivedFromPlating} KG, Sent to Store: ${sentToStore} KG, Rejections: ${packRejectionQty} KG, Remaining: ${remainingQty} KG. Style: ${packStyle}.`
+      remarks: `Packed in ${packBoxCount} boxes. Quality verified. Recv from Plating: ${receivedFromPlating} KG, Sent to Store: ${sentToStore} KG, Rejections: ${packRejectionQty} KG, Remaining: ${remainingQty} KG.`
     });
 
     setPackRejectionQty(0);
@@ -280,6 +329,16 @@ export default function DepartmentOperations({
   const handleCompleteStore = (jCard: JobCard) => {
     const receivedFromPacking = storeQtyReceived;
     const sentToDispatch = storeQtySentToDispatch;
+
+    if (sentToDispatch > receivedFromPacking) {
+      alert(`Error: Sent quantity (${sentToDispatch} KG) cannot exceed the received quantity (${receivedFromPacking} KG).`);
+      return;
+    }
+    if (sentToDispatch + storeRejectionQty > receivedFromPacking) {
+      alert(`Error: Combined sent quantity (${sentToDispatch} KG) and rejection quantity (${storeRejectionQty} KG) cannot exceed the received quantity (${receivedFromPacking} KG).`);
+      return;
+    }
+
     const remainingQty = Math.max(0, receivedFromPacking - sentToDispatch - storeRejectionQty);
 
     onUpdateJobCard(jCard.jobCardNo, {
@@ -328,7 +387,7 @@ export default function DepartmentOperations({
     });
 
     // Mark corresponding last movement targeting Dispatch as accepted
-    const transitMov = movements.find(m => m.jobCardNo === jCard.jobCardNo && m.toDepartment === 'Dispatch' && !m.accepted);
+    const transitMov = movements.find(m => m.jobCardNo.toLowerCase() === jCard.jobCardNo.toLowerCase() && m.toDepartment === 'Dispatch' && !m.accepted);
     if (transitMov) {
       onAcceptMovement(transitMov.movementId, `Dispatched via Invoice ${dispInvoice}`);
     }
@@ -344,15 +403,50 @@ export default function DepartmentOperations({
 
   // B. Job cards currently assigned to this department
   const activeDepartmentJobs = jobCards.filter(c => {
+    if (c.completed) return false;
     // Dispatch owns tracking when completed or creating, otherwise matches exactly
     if (activeDept === 'Dispatch') {
-      return !c.completed;
+      return true;
     }
-    const match = c.currentDepartment === activeDept && !c.completed;
     if (activeDept === 'Production') {
-      console.log(`Checking Production for ${c.jobCardNo}: currentDept=${c.currentDepartment}, completed=${c.completed}, match=${match}`);
+      const totalMovedFromProd = movements
+        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
+        .reduce((sum, m) => sum + m.quantity, 0);
+      const pendingProdQty = c.orderQty - totalMovedFromProd;
+      return c.currentDepartment === 'Production' || pendingProdQty > 0;
     }
-    return match;
+    if (activeDept === 'Heat Treatment') {
+      if (!c.heatTreatmentRequired) return false;
+      const totalReceivedAtHT = movements
+        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Heat Treatment' && m.accepted)
+        .reduce((sum, m) => sum + m.quantity, 0);
+      const totalRoutedFromHT = movements
+        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Heat Treatment')
+        .reduce((sum, m) => sum + m.quantity, 0);
+      const pendingHTQty = totalReceivedAtHT - totalRoutedFromHT - (c.heatTreatmentDetails?.rejectionQty || 0);
+      return c.currentDepartment === 'Heat Treatment' || (totalReceivedAtHT > 0 && pendingHTQty > 0);
+    }
+    if (activeDept === 'Plating') {
+      const totalReceivedAtPlating = movements
+        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Plating' && m.accepted)
+        .reduce((sum, m) => sum + m.quantity, 0);
+      const totalRoutedFromPlating = movements
+        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Plating')
+        .reduce((sum, m) => sum + m.quantity, 0);
+      const pendingPlatingQty = totalReceivedAtPlating - totalRoutedFromPlating - (c.platingDetails?.rejectionQty || 0);
+      return c.currentDepartment === 'Plating' || (totalReceivedAtPlating > 0 && pendingPlatingQty > 0);
+    }
+    if (activeDept === 'Packing') {
+      const totalReceivedAtPacking = movements
+        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.toDepartment === 'Packing' && m.accepted)
+        .reduce((sum, m) => sum + m.quantity, 0);
+      const totalRoutedFromPacking = movements
+        .filter(m => m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && m.fromDepartment === 'Packing')
+        .reduce((sum, m) => sum + m.quantity, 0);
+      const pendingPackingQty = totalReceivedAtPacking - totalRoutedFromPacking - (c.packingDetails?.rejectionQty || 0);
+      return c.currentDepartment === 'Packing' || (totalReceivedAtPacking > 0 && pendingPackingQty > 0);
+    }
+    return c.currentDepartment === activeDept;
   });
 
   // C. Archived Outbound transfers from this department
@@ -788,6 +882,44 @@ export default function DepartmentOperations({
                       (activeDept === 'Store' && activeStoreJob === job.jobCardNo);
 
                     const m = getJobCardProcessMetrics(job, movements);
+                    const totalMovedFromProd = movements
+                      .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Production')
+                      .reduce((sum, m) => sum + m.quantity, 0);
+                    const pendingProdQty = job.orderQty - totalMovedFromProd;
+                    const isRoutedDownstream = job.currentDepartment !== 'Production';
+
+                    // 1. Heat Treatment variables
+                    const totalReceivedAtHT = movements
+                      .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.toDepartment === 'Heat Treatment' && m.accepted)
+                      .reduce((sum, m) => sum + m.quantity, 0);
+                    const htInputDisplay = totalReceivedAtHT > 0 ? totalReceivedAtHT : (job.currentDepartment === 'Heat Treatment' ? m.qtyReceivedFromProd : 0);
+                    const totalRoutedFromHT = movements
+                      .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Heat Treatment')
+                      .reduce((sum, m) => sum + m.quantity, 0);
+                    const pendingHTQty = Math.max(0, htInputDisplay - totalRoutedFromHT - (job.heatTreatmentDetails?.rejectionQty || 0));
+                    const isHTRoutedDownstream = job.currentDepartment !== 'Heat Treatment';
+
+                    // 2. Plating variables
+                    const totalReceivedAtPlating = movements
+                      .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.toDepartment === 'Plating' && m.accepted)
+                      .reduce((sum, m) => sum + m.quantity, 0);
+                    const platingInputDisplay = totalReceivedAtPlating > 0 ? totalReceivedAtPlating : (job.currentDepartment === 'Plating' ? m.qtyReceivedAtPlating : 0);
+                    const totalRoutedFromPlating = movements
+                      .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Plating')
+                      .reduce((sum, m) => sum + m.quantity, 0);
+                    const pendingPlatingQty = Math.max(0, platingInputDisplay - totalRoutedFromPlating - (job.platingDetails?.rejectionQty || 0));
+                    const isPlatingRoutedDownstream = job.currentDepartment !== 'Plating';
+
+                    // 3. Packing variables
+                    const totalReceivedAtPacking = movements
+                      .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.toDepartment === 'Packing' && m.accepted)
+                      .reduce((sum, m) => sum + m.quantity, 0);
+                    const packingInputDisplay = totalReceivedAtPacking > 0 ? totalReceivedAtPacking : (job.currentDepartment === 'Packing' ? m.qtyReceivedAtPacking : 0);
+                    const totalRoutedFromPacking = movements
+                      .filter(m => m.jobCardNo.toLowerCase() === job.jobCardNo.toLowerCase() && m.fromDepartment === 'Packing')
+                      .reduce((sum, m) => sum + m.quantity, 0);
+                    const pendingPackingQty = Math.max(0, packingInputDisplay - totalRoutedFromPacking - (job.packingDetails?.rejectionQty || 0));
+                    const isPackingRoutedDownstream = job.currentDepartment !== 'Packing';
 
                     return (
                       <div 
@@ -803,9 +935,127 @@ export default function DepartmentOperations({
                             <p className="font-extrabold text-slate-900 dark:text-white mt-1.5 font-sans text-sm">
                               {job.partyName}
                             </p>
-                            <p className="text-[11px] text-slate-400 mt-0.5">
-                              {job.itemName} • Order Qty: {job.orderQty} KG | <strong>Custody Weight: {job.currentQty} KG</strong> (Outstanding Balance: {job.balanceQty} KG)
-                            </p>
+                            {activeDept === 'Production' ? (
+                              <div className="space-y-1 mt-1.5">
+                                <p className="text-xs text-slate-600 dark:text-slate-300 font-semibold">
+                                  {job.itemName}
+                                </p>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2 bg-slate-100/70 dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200/40">
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Total Order</span>
+                                    <span className="text-xs font-bold font-mono text-slate-800 dark:text-white">{job.orderQty.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-emerald-600 dark:text-emerald-450 uppercase font-bold">Produced & Routed</span>
+                                    <span className="text-xs font-bold font-mono text-emerald-600 dark:text-emerald-400">{totalMovedFromProd.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-amber-500 uppercase font-bold">Pending Production</span>
+                                    <span className="text-xs font-bold font-mono text-amber-600 dark:text-amber-400">{pendingProdQty.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Current Custody</span>
+                                    <span className="text-xs font-mono font-medium text-indigo-600 dark:text-indigo-400">{job.currentDepartment} ({job.currentQty} KG)</span>
+                                  </div>
+                                </div>
+                                {isRoutedDownstream && (
+                                  <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
+                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : activeDept === 'Heat Treatment' ? (
+                              <div className="space-y-1 mt-1.5">
+                                <p className="text-xs text-slate-600 dark:text-slate-300 font-semibold">
+                                  {job.itemName}
+                                </p>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2 bg-slate-100/70 dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200/40">
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Total Received</span>
+                                    <span className="text-xs font-bold font-mono text-slate-800 dark:text-white">{htInputDisplay.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-emerald-600 dark:text-emerald-450 uppercase font-bold">Hardened & Routed</span>
+                                    <span className="text-xs font-bold font-mono text-emerald-600 dark:text-emerald-400">{totalRoutedFromHT.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-amber-500 uppercase font-bold">Pending Hardening</span>
+                                    <span className="text-xs font-bold font-mono text-amber-600 dark:text-amber-400">{pendingHTQty.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Current Custody</span>
+                                    <span className="text-xs font-mono font-medium text-indigo-600 dark:text-indigo-400">{job.currentDepartment} ({job.currentQty} KG)</span>
+                                  </div>
+                                </div>
+                                {isHTRoutedDownstream && (
+                                  <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
+                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : activeDept === 'Plating' ? (
+                              <div className="space-y-1 mt-1.5">
+                                <p className="text-xs text-slate-600 dark:text-slate-300 font-semibold">
+                                  {job.itemName}
+                                </p>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2 bg-slate-100/70 dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200/40">
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Total Received</span>
+                                    <span className="text-xs font-bold font-mono text-slate-800 dark:text-white">{platingInputDisplay.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-emerald-600 dark:text-emerald-450 uppercase font-bold">Coated & Routed</span>
+                                    <span className="text-xs font-bold font-mono text-emerald-600 dark:text-emerald-400">{totalRoutedFromPlating.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-amber-500 uppercase font-bold">Pending Plating</span>
+                                    <span className="text-xs font-bold font-mono text-amber-600 dark:text-amber-400">{pendingPlatingQty.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Current Custody</span>
+                                    <span className="text-xs font-mono font-medium text-indigo-600 dark:text-indigo-400">{job.currentDepartment} ({job.currentQty} KG)</span>
+                                  </div>
+                                </div>
+                                {isPlatingRoutedDownstream && (
+                                  <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
+                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : activeDept === 'Packing' ? (
+                              <div className="space-y-1 mt-1.5">
+                                <p className="text-xs text-slate-600 dark:text-slate-300 font-semibold">
+                                  {job.itemName}
+                                </p>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mt-2 bg-slate-100/70 dark:bg-slate-900 p-2.5 rounded-lg border border-slate-200/40">
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Total Received</span>
+                                    <span className="text-xs font-bold font-mono text-slate-800 dark:text-white">{packingInputDisplay.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-emerald-600 dark:text-emerald-450 uppercase font-bold">Packed & Routed</span>
+                                    <span className="text-xs font-bold font-mono text-emerald-600 dark:text-emerald-400">{totalRoutedFromPacking.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-amber-500 uppercase font-bold">Pending Packing</span>
+                                    <span className="text-xs font-bold font-mono text-amber-600 dark:text-amber-400">{pendingPackingQty.toLocaleString()} KG</span>
+                                  </div>
+                                  <div>
+                                    <span className="block text-[10px] text-slate-400 uppercase font-bold">Current Custody</span>
+                                    <span className="text-xs font-mono font-medium text-indigo-600 dark:text-indigo-400">{job.currentDepartment} ({job.currentQty} KG)</span>
+                                  </div>
+                                </div>
+                                {isPackingRoutedDownstream && (
+                                  <div className="mt-1.5 text-[10.5px] text-indigo-600 dark:text-indigo-400 font-medium flex items-center gap-1 font-sans">
+                                    <span>↪️ Currently processing downstream at {job.currentDepartment}. Remaining pending quantity can be processed & transferred below.</span>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              <p className="text-[11px] text-slate-400 mt-0.5">
+                                {job.itemName} • Order Qty: {job.orderQty} KG | <strong>Custody Weight: {job.currentQty} KG</strong> (Outstanding Balance: {job.balanceQty} KG)
+                              </p>
+                            )}
 
 
                           </div>
@@ -826,37 +1076,25 @@ export default function DepartmentOperations({
                                   // Set appropriate form parameters before launching sub-form
                                   if (activeDept === 'Production') {
                                     setActiveProdJob(isProcessing ? null : job.jobCardNo);
-                                    setProdQty(job.currentQty);
+                                    setProdQty(pendingProdQty);
                                   } else if (activeDept === 'Heat Treatment') {
                                     setActiveHtJob(isProcessing ? null : job.jobCardNo);
                                     if (!isProcessing) {
-                                      const m = getJobCardProcessMetrics(job, movements);
-                                      setHtQtyReceived(m.qtyReceivedFromProd);
-                                      const defaultSent = job.customRoutedToPlating !== undefined && job.customRoutedToPlating !== null
-                                        ? job.customRoutedToPlating
-                                        : Math.max(0, m.qtyReceivedFromProd - htRejectionQty);
-                                      setHtQtySentToPlating(defaultSent);
+                                      setHtQtyReceived(pendingHTQty);
+                                      setHtQtySentToPlating(pendingHTQty);
                                     }
                                   } else if (activeDept === 'Plating') {
                                     setActivePlatingJob(isProcessing ? null : job.jobCardNo);
                                     if (!isProcessing) {
-                                      const met = getJobCardProcessMetrics(job, movements);
-                                      setPlatingQtyReceived(met.qtyReceivedAtPlating);
-                                      const defaultSent = job.customRoutedToPacking !== undefined && job.customRoutedToPacking !== null
-                                        ? job.customRoutedToPacking
-                                        : Math.max(0, met.qtyReceivedAtPlating - platingRejectionQty);
-                                      setPlatingQtySentToPacking(defaultSent);
+                                      setPlatingQtyReceived(pendingPlatingQty);
+                                      setPlatingQtySentToPacking(pendingPlatingQty);
                                     }
                                   } else if (activeDept === 'Packing') {
                                     setActivePackingJob(isProcessing ? null : job.jobCardNo);
                                     if (!isProcessing) {
-                                      const met = getJobCardProcessMetrics(job, movements);
-                                      setPackQtyReceived(met.qtyReceivedAtPacking);
-                                      const defaultSent = job.customRoutedToStore !== undefined && job.customRoutedToStore !== null
-                                        ? job.customRoutedToStore
-                                        : Math.max(0, met.qtyReceivedAtPacking - packRejectionQty);
-                                      setPackQtySentToStore(defaultSent);
-                                      setPackQty(defaultSent);
+                                      setPackQtyReceived(pendingPackingQty);
+                                      setPackQtySentToStore(pendingPackingQty);
+                                      setPackQty(pendingPackingQty);
                                     }
                                   } else if (activeDept === 'Store') {
                                     setActiveStoreJob(isProcessing ? null : job.jobCardNo);
@@ -973,10 +1211,15 @@ export default function DepartmentOperations({
                                   value={htRejectionQty}
                                   onChange={e => {
                                     const rej = Math.max(0, parseInt(e.target.value) || 0);
-                                    setHtRejectionQty(rej);
-                                    setHtQtySentToPlating(prev => Math.max(0, htQtyReceived - rej));
+                                    if (rej > htQtyReceived) {
+                                      setHtRejectionQty(htQtyReceived);
+                                      setHtQtySentToPlating(0);
+                                    } else {
+                                      setHtRejectionQty(rej);
+                                      setHtQtySentToPlating(Math.max(0, htQtyReceived - rej));
+                                    }
                                   }}
-                                  className="w-full bg-white dark:bg-slate-900 border border-rose-200 focus:border-rose-500 rounded p-1.5 font-mono font-bold text-rose-600 dark:text-rose-450"
+                                  className="w-full bg-white dark:bg-slate-900 border border-rose-200 focus:border-rose-500 rounded p-1.5 font-mono font-bold text-rose-600 dark:text-rose-455"
                                 />
                               </div>
                             </div>
@@ -1010,7 +1253,14 @@ export default function DepartmentOperations({
                                     min="0"
                                     max={htQtyReceived}
                                     value={htQtySentToPlating}
-                                    onChange={e => setHtQtySentToPlating(Math.max(0, parseInt(e.target.value) || 0))}
+                                    onChange={e => {
+                                      const val = Math.max(0, parseInt(e.target.value) || 0);
+                                      if (val > htQtyReceived) {
+                                        setHtQtySentToPlating(htQtyReceived);
+                                      } else {
+                                        setHtQtySentToPlating(val);
+                                      }
+                                    }}
                                     className="w-full bg-white dark:bg-slate-950 font-mono font-extrabold text-[12px] text-purple-700 dark:text-purple-400 border border-purple-200 focus:border-purple-500 rounded p-1.5 focus:outline-none"
                                     title="How much quantity we send to Plating"
                                   />
@@ -1089,10 +1339,15 @@ export default function DepartmentOperations({
                                   value={platingRejectionQty}
                                   onChange={e => {
                                     const rej = Math.max(0, parseInt(e.target.value) || 0);
-                                    setPlatingRejectionQty(rej);
-                                    setPlatingQtySentToPacking(prev => Math.max(0, platingQtyReceived - rej));
+                                    if (rej > platingQtyReceived) {
+                                      setPlatingRejectionQty(platingQtyReceived);
+                                      setPlatingQtySentToPacking(0);
+                                    } else {
+                                      setPlatingRejectionQty(rej);
+                                      setPlatingQtySentToPacking(Math.max(0, platingQtyReceived - rej));
+                                    }
                                   }}
-                                  className="w-full bg-white dark:bg-slate-900 border border-rose-200 focus:border-rose-500 rounded p-1.5 font-mono font-bold text-rose-600 dark:text-rose-450"
+                                  className="w-full bg-white dark:bg-slate-900 border border-rose-200 focus:border-rose-500 rounded p-1.5 font-mono font-bold text-rose-600 dark:text-rose-455"
                                 />
                               </div>
                             </div>
@@ -1126,7 +1381,14 @@ export default function DepartmentOperations({
                                     min="0"
                                     max={platingQtyReceived}
                                     value={platingQtySentToPacking}
-                                    onChange={e => setPlatingQtySentToPacking(Math.max(0, parseInt(e.target.value) || 0))}
+                                    onChange={e => {
+                                      const val = Math.max(0, parseInt(e.target.value) || 0);
+                                      if (val > platingQtyReceived) {
+                                        setPlatingQtySentToPacking(platingQtyReceived);
+                                      } else {
+                                        setPlatingQtySentToPacking(val);
+                                      }
+                                    }}
                                     className="w-full bg-white dark:bg-slate-950 font-mono font-extrabold text-[12px] text-purple-700 dark:text-purple-400 border border-purple-200 focus:border-purple-500 rounded p-1.5 focus:outline-none"
                                     title="How much quantity we send for Packing"
                                   />
@@ -1198,8 +1460,16 @@ export default function DepartmentOperations({
                                   value={packRejectionQty}
                                   onChange={e => {
                                     const rej = Math.max(0, parseInt(e.target.value) || 0);
-                                    setPackRejectionQty(rej);
-                                    setPackQtySentToStore(prev => Math.max(0, packQtyReceived - rej));
+                                    if (rej > packQtyReceived) {
+                                      setPackRejectionQty(packQtyReceived);
+                                      setPackQtySentToStore(0);
+                                      setPackQty(0);
+                                    } else {
+                                      setPackRejectionQty(rej);
+                                      const val = Math.max(0, packQtyReceived - rej);
+                                      setPackQtySentToStore(val);
+                                      setPackQty(val);
+                                    }
                                   }}
                                   className="w-full bg-white dark:bg-slate-900 border border-rose-200 focus:border-rose-500 rounded p-1.5 font-mono font-bold text-rose-600 dark:text-rose-450"
                                 />
@@ -1208,7 +1478,7 @@ export default function DepartmentOperations({
 
                             {/* Quantity Allocation Control Section */}
                             <div className="bg-slate-100/85 dark:bg-slate-900/60 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 space-y-3">
-                              <h5 className="font-bold text-slate-700 dark:text-slate-350 text-[10px] uppercase tracking-wider flex items-center gap-1.5">
+                              <h5 className="font-bold text-slate-705 dark:text-slate-350 text-[10px] uppercase tracking-wider flex items-center gap-1.5">
                                 <span className="h-2 w-2 rounded-full bg-[#3B82F6] inline-block"></span>
                                 Material Quantity Allocation & Balance Tracker (Packing to Store)
                               </h5>
@@ -1237,8 +1507,13 @@ export default function DepartmentOperations({
                                     value={packQtySentToStore}
                                     onChange={e => {
                                       const val = Math.max(0, parseInt(e.target.value) || 0);
-                                      setPackQtySentToStore(val);
-                                      setPackQty(val);
+                                      if (val > packQtyReceived) {
+                                        setPackQtySentToStore(packQtyReceived);
+                                        setPackQty(packQtyReceived);
+                                      } else {
+                                        setPackQtySentToStore(val);
+                                        setPackQty(val);
+                                      }
                                     }}
                                     className="w-full bg-white dark:bg-slate-950 font-mono font-extrabold text-[12px] text-purple-700 dark:text-purple-400 border border-purple-200 focus:border-purple-500 rounded p-1.5 focus:outline-none"
                                     title="How much quantity we send to Store"
@@ -1302,8 +1577,16 @@ export default function DepartmentOperations({
                                   value={storeRejectionQty}
                                   onChange={e => {
                                     const rej = Math.max(0, parseInt(e.target.value) || 0);
-                                    setStoreRejectionQty(rej);
-                                    setStoreQtySentToDispatch(prev => Math.max(0, storeQtyReceived - rej));
+                                    if (rej > storeQtyReceived) {
+                                      setStoreRejectionQty(storeQtyReceived);
+                                      setStoreQtySentToDispatch(0);
+                                      setStoreVerifiedQty(0);
+                                    } else {
+                                      setStoreRejectionQty(rej);
+                                      const val = Math.max(0, storeQtyReceived - rej);
+                                      setStoreQtySentToDispatch(val);
+                                      setStoreVerifiedQty(val);
+                                    }
                                   }}
                                   className="w-full bg-white dark:bg-slate-900 border border-rose-200 focus:border-rose-500 rounded p-1.5 font-mono font-bold text-rose-600 dark:text-rose-455"
                                 />
@@ -1341,8 +1624,13 @@ export default function DepartmentOperations({
                                     value={storeQtySentToDispatch}
                                     onChange={e => {
                                       const val = Math.max(0, parseInt(e.target.value) || 0);
-                                      setStoreQtySentToDispatch(val);
-                                      setStoreVerifiedQty(val);
+                                      if (val > storeQtyReceived) {
+                                        setStoreQtySentToDispatch(storeQtyReceived);
+                                        setStoreVerifiedQty(storeQtyReceived);
+                                      } else {
+                                        setStoreQtySentToDispatch(val);
+                                        setStoreVerifiedQty(val);
+                                      }
                                     }}
                                     className="w-full bg-white dark:bg-slate-950 font-mono font-extrabold text-[12px] text-purple-700 dark:text-purple-400 border border-purple-200 focus:border-purple-500 rounded p-1.5 focus:outline-none"
                                     title="Verified quantity stocked and ready to dispatch"

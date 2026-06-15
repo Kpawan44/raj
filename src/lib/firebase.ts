@@ -409,14 +409,14 @@ export class DBService {
   private static async getJobCardByNo(jobCardNo: string): Promise<JobCard | null> {
     if (useRealFirebase && db) {
       try {
-        const snap = await getDoc(doc(db, 'mfr_job_cards', jobCardNo));
+        const snap = await getDoc(doc(db, 'mfr_job_cards', jobCardNo.toUpperCase()));
         return snap.exists() ? (snap.data() as JobCard) : null;
       } catch (err) {
         return null;
       }
     }
     const cards = await this.getJobCards();
-    return cards.find(c => c.jobCardNo === jobCardNo) || null;
+    return cards.find(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase()) || null;
   }
 
   // Refactor Sheets trigger to a shared helper for clarity
@@ -637,7 +637,7 @@ export class DBService {
   static async updateJobCard(jobCardNo: string, updates: Partial<JobCard>, userId: string, userName: string): Promise<void> {
     // 1. Update Local Storage offline cache first
     const cards = await this.getJobCards();
-    const idx = cards.findIndex(c => c.jobCardNo === jobCardNo);
+    const idx = cards.findIndex(c => c.jobCardNo.toLowerCase() === jobCardNo.toLowerCase());
     if (idx === -1) throw new Error(`Job card ${jobCardNo} not found`);
     
     cards[idx] = { ...cards[idx], ...updates } as JobCard;
@@ -646,9 +646,9 @@ export class DBService {
     // 2. Write to physical Firestore
     if (useRealFirebase && db) {
       try {
-        await updateDoc(doc(db, 'mfr_job_cards', jobCardNo), updates as any);
+        await updateDoc(doc(db, 'mfr_job_cards', jobCardNo.toUpperCase()), updates as any);
       } catch (err: any) {
-        handleFirestoreError(err, OperationType.UPDATE, `mfr_job_cards/${jobCardNo}`);
+        handleFirestoreError(err, OperationType.UPDATE, `mfr_job_cards/${jobCardNo.toUpperCase()}`);
         const shouldThrow = err && (
           err.code === 'permission-denied' || 
           err.code === 'invalid-argument' || 
@@ -665,6 +665,34 @@ export class DBService {
 
     await this.logAction(userId, userName, 'UPDATE_JOB_CARD', `Updated Job Card ${jobCardNo}. Status: ${updates.status || cards[idx].status}`);
     
+    // Check if total rejection quantity for the job card exceeds 10% of total order quantity
+    try {
+      const updatedCard = cards[idx];
+      const totalRejections = (updatedCard.heatTreatmentDetails?.rejectionQty || 0) +
+                              (updatedCard.platingDetails?.rejectionQty || 0) +
+                              (updatedCard.packingDetails?.rejectionQty || 0) +
+                              (updatedCard.storeDetails?.rejectionQty || 0);
+      const orderQty = updatedCard.orderQty || 0;
+      if (orderQty > 0 && totalRejections > orderQty * 0.10) {
+        const currentNotifications = await this.getNotifications();
+        const alreadyNotified = currentNotifications.some(n => 
+          n.department === 'Production' &&
+          n.title.includes('High Rejection') &&
+          n.message.includes(jobCardNo)
+        );
+        if (!alreadyNotified) {
+          await this.createNotification({
+            department: 'Production',
+            title: '⚠️ High Rejection Rate Alert',
+            message: `Job Card ${jobCardNo} (${updatedCard.itemName}) has exceeded 10% rejection threshold. Total Rejections: ${totalRejections} KG / Order Qty: ${orderQty} KG (${((totalRejections / orderQty) * 100).toFixed(1)}%).`,
+            userId: 'all_production'
+          });
+        }
+      }
+    } catch (e) {
+      console.error("Error creating rejection rate alert", e);
+    }
+
     this.triggerSheetsSync(jobCardNo, updates, userName);
   }
 
@@ -672,9 +700,9 @@ export class DBService {
     // 1. Write to physical Firestore first
     if (useRealFirebase && db) {
       try {
-        await deleteDoc(doc(db, 'mfr_job_cards', jobCardNo));
+        await deleteDoc(doc(db, 'mfr_job_cards', jobCardNo.toUpperCase()));
       } catch (err: any) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_job_cards/${jobCardNo}`);
+        handleFirestoreError(err, OperationType.DELETE, `mfr_job_cards/${jobCardNo.toUpperCase()}`);
         const shouldThrow = err && (
           err.code === 'permission-denied' || 
           err.code === 'invalid-argument' || 
@@ -691,7 +719,7 @@ export class DBService {
 
     // 2. Update Local Storage offline cache second
     const cards = await this.getJobCards();
-    const updatedCards = cards.filter(c => c.jobCardNo !== jobCardNo);
+    const updatedCards = cards.filter(c => c.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
     setLocalStorageItem('mfr_job_cards', updatedCards);
 
     await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Deleted Job Card: ${jobCardNo}`);
@@ -833,7 +861,7 @@ export class DBService {
     // If sent to 'Completed', process job card closure
     if (mov.toDepartment === 'Completed') {
       const cards = await this.getJobCards();
-      const cardIdx = cards.findIndex(c => c.jobCardNo === mov!.jobCardNo);
+      const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === mov!.jobCardNo.toLowerCase());
       if (cardIdx >= 0) {
         const card = cards[cardIdx];
         const newBalance = Math.max(0, card.orderQty - mov!.quantity);
