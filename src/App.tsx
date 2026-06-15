@@ -53,7 +53,6 @@ export default function App() {
   // --- REGISTRATION FORM STATES ---
   const [isRegistering, setIsRegistering] = useState(false);
   const [regName, setRegName] = useState('');
-  const [regPin, setRegPin] = useState('');
   const [regSuccess, setRegSuccess] = useState('');
 
   // --- RECT ACTIVE STATE TABLES ---
@@ -192,21 +191,15 @@ export default function App() {
     setRegSuccess('');
 
     const trimmedName = loginName.trim();
-    const trimmedPin = loginPin.trim();
 
-    if (!trimmedName || !trimmedPin) {
-      setAuthError('Both Name and PIN are required.');
+    if (!trimmedName) {
+      setAuthError('Name is required.');
       return;
     }
 
-    if (trimmedPin.length !== 4) {
-      setAuthError('PIN must be exactly 4 digits.');
-      return;
-    }
-
-    const found = users.find(u => u.name.toLowerCase() === trimmedName.toLowerCase() && u.pin === trimmedPin && u.active);
+    const found = users.find(u => u.name.toLowerCase() === trimmedName.toLowerCase() && u.active);
     if (!found) {
-      setAuthError('Invalid credentials. Check your name or 4-digit PIN.');
+      setAuthError('Invalid credentials. Check your name.');
       return;
     }
 
@@ -214,7 +207,7 @@ export default function App() {
     sessionStorage.setItem('mfr_active_user_uid', found.userId);
     setLoginName('');
     setLoginPin('');
-    DBService.logAction(found.userId, found.name, 'USER_LOGIN', `Logged in using secure PIN.`);
+    DBService.logAction(found.userId, found.name, 'USER_LOGIN', `Logged in.`);
   };
 
   const handleRegisterUser = async (e: React.FormEvent) => {
@@ -223,21 +216,15 @@ export default function App() {
     setRegSuccess('');
 
     const trimmedName = regName.trim();
-    const trimmedPin = regPin.trim();
 
-    if (!trimmedName || !trimmedPin) {
-      setAuthError('All fields of registration are required.');
+    if (!trimmedName) {
+      setAuthError('Name is required.');
       return;
     }
 
-    if (trimmedPin.length !== 4) {
-      setAuthError('PIN must be exactly 4 digits.');
-      return;
-    }
-
-    const nameOrPinExists = users.some(u => u.name.toLowerCase() === trimmedName.toLowerCase() || u.pin === trimmedPin);
-    if (nameOrPinExists) {
-      setAuthError('User name or 4-digit PIN is already registered.');
+    const nameExists = users.some(u => u.name.toLowerCase() === trimmedName.toLowerCase());
+    if (nameExists) {
+      setAuthError('User name is already registered.');
       return;
     }
 
@@ -246,9 +233,9 @@ export default function App() {
       userId: newUserId,
       name: trimmedName,
       email: `${trimmedName.toLowerCase().replace(/\s+/g, '')}@factory.com`,
-      pin: trimmedPin,
+      pin: '0000', // Default PIN for compatibility
       department: 'Admin',
-      role: 'admin', // Only manager signup is allowed from login page
+      role: 'admin',
       active: true,
       createdAt: new Date().toISOString()
     };
@@ -268,9 +255,7 @@ export default function App() {
       
       // Auto-prefill the login fields
       setLoginName(trimmedName);
-      setLoginPin(trimmedPin);
       setRegName('');
-      setRegPin('');
 
       // Go back to login tab
       setIsRegistering(false);
@@ -307,8 +292,10 @@ export default function App() {
 
   const handleCreateJobCard = async (job: any) => {
     if (!currentUser) return;
+    console.log("Creating job card:", job);
     try {
-      await DBService.createJobCard(job, currentUser.userId, currentUser.name);
+      const newCard = await DBService.createJobCard(job, currentUser.userId, currentUser.name);
+      console.log("Job card created:", newCard);
       alert(`Job Card successfully created!`);
       refreshAllStates();
     } catch (err: any) {
@@ -604,23 +591,6 @@ export default function App() {
                     />
                   </div>
 
-                  <div>
-                    <label className="block text-slate-600 font-bold mb-1.5 uppercase tracking-wide text-[10px]">4-Digit Security PIN</label>
-                    <input
-                      type="password"
-                      maxLength={4}
-                      placeholder="e.g. 1234"
-                      required
-                      value={regPin}
-                      onChange={e => setRegPin(e.target.value.replace(/\D/g, ''))}
-                      className="w-full bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg px-4 py-2.5 text-slate-800 focus:outline-none focus:border-[#3B82F6] font-medium font-mono tracking-widest text-[#1E293B]"
-                    />
-                  </div>
-
-                  <div className="p-2.5 bg-sky-50 text-sky-800 rounded-lg text-[10.5px] font-semibold border border-[#BAE6FD]">
-                    ℹ️ Newly registered accounts are automatically assigned as Managers with admin permissions.
-                  </div>
-
                   <button
                     type="submit"
                     className="w-full bg-[#3B82F6] hover:bg-blue-600 text-white font-bold py-3 rounded-lg shadow-sm transition-all uppercase tracking-wider font-mono text-xs cursor-pointer border border-[#1D4ED8]"
@@ -646,7 +616,7 @@ export default function App() {
                     <Lock className="h-5 w-5" />
                     Personnel Access Port
                   </h3>
-                  <p className="text-xs text-slate-500 mt-1">Enter your registered Name and 4-digit PIN to access the workstation terminal.</p>
+                  <p className="text-xs text-slate-500 mt-1">Enter your registered Name to access the workstation terminal.</p>
                 </div>
 
                 {regSuccess && (
@@ -674,22 +644,6 @@ export default function App() {
                         value={loginName}
                         onChange={e => setLoginName(e.target.value)}
                         className="w-full bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg pl-10 pr-4 py-2.5 text-slate-800 focus:outline-none focus:border-[#3B82F6] font-medium"
-                      />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-slate-600 font-bold mb-1.5 uppercase tracking-wide text-[10px]">4-Digit PIN</label>
-                    <div className="relative">
-                      <Lock className="absolute left-3 top-3 h-4 w-4 text-slate-450" />
-                      <input
-                        type="password"
-                        maxLength={4}
-                        placeholder="e.g. 1234"
-                        required
-                        value={loginPin}
-                        onChange={e => setLoginPin(e.target.value.replace(/\D/g, ''))}
-                        className="w-full bg-[#F8FAFC] border border-[#E2E8F0] rounded-lg pl-10 pr-4 py-2.5 text-slate-800 focus:outline-none focus:border-[#3B82F6] font-mono tracking-widest text-[#1E293B] font-bold text-center text-sm"
                       />
                     </div>
                   </div>
@@ -723,7 +677,7 @@ export default function App() {
                         className="p-2 rounded bg-[#F8FAFC] hover:bg-[#EFF6FF] text-[10px] text-slate-700 border border-[#E2E8F0] transition text-left truncate hover:border-[#BFDBFE] cursor-pointer"
                       >
                         <strong className="text-[#1D4ED8]">{user.department}</strong>
-                        <span className="block text-[9px] text-slate-500 truncate mt-0.5">{user.name} (PIN: {user.pin})</span>
+                        <span className="block text-[9px] text-slate-500 truncate mt-0.5">{user.name}</span>
                       </button>
                     ))}
                   </div>

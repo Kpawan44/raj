@@ -29,6 +29,7 @@ type ReportType =
   | 'dispatch'
   | 'pending'
   | 'completed'
+  | 'rejected'
   | 'movements'
   | 'balance';
 
@@ -48,12 +49,19 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
     { id: 'dispatch', label: 'Dispatch Shipment Report', desc: "Invoiced amounts and vehicle tracking records" },
     { id: 'pending', label: 'Active Outstanding Queue', desc: "Incomplete orders currently on work floors" },
     { id: 'completed', label: 'Archived Completed Orders', desc: "Perfect run items fully shipped out" },
+    { id: 'rejected', label: 'Rejected Orders Report', desc: "Orders flagged with rejection status" },
     { id: 'movements', label: 'Material Movement Log', desc: "Step-by-step chain of custody transfer ledger" },
     { id: 'balance', label: 'Balance Quantity Audit', desc: "Formula calculations: Target vs Processed (Scrap analysis)" }
   ];
 
   // Filters calculation
   const getFilteredData = () => {
+    console.log("ReportView: total jobCards loaded =", jobCards.length);
+    if (jobCards.length > 0) {
+        console.log("First job card:", jobCards[0]);
+        const found = jobCards.find(jc => jc.jobCardNo === 'jc-1001');
+        console.log("jc-1001 found in jobCards?", !!found);
+    }
     let baseData: any[] = [];
 
     // 1. Filter dataset according to the reports type
@@ -182,6 +190,19 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
             status: c.status,
             orderQty: c.orderQty,
             finalQty: c.currentQty,
+            createdAt: c.createdAt
+          }));
+        break;
+      case 'rejected':
+        baseData = jobCards
+          .filter(c => c.status === 'Rejected')
+          .map(c => ({
+            jobCardNo: c.jobCardNo,
+            orderNo: c.orderNo,
+            partyName: c.partyName,
+            itemName: c.itemName,
+            currentDepartment: c.currentDepartment,
+            status: c.status,
             createdAt: c.createdAt
           }));
         break;

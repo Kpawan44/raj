@@ -348,7 +348,11 @@ export default function DepartmentOperations({
     if (activeDept === 'Dispatch') {
       return !c.completed;
     }
-    return c.currentDepartment === activeDept && !c.completed;
+    const match = c.currentDepartment === activeDept && !c.completed;
+    if (activeDept === 'Production') {
+      console.log(`Checking Production for ${c.jobCardNo}: currentDept=${c.currentDepartment}, completed=${c.completed}, match=${match}`);
+    }
+    return match;
   });
 
   // C. Archived Outbound transfers from this department

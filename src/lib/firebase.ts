@@ -77,20 +77,7 @@ let dbInstance: any = null;
 let authInstance: any = null;
 let useRealFirebase = false;
 
-if (!isPlaceholder) {
-  try {
-    const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    dbInstance = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-    authInstance = getAuth(app);
-    useRealFirebase = true;
-    console.log("Firebase initialized successfully in REAL mode.");
-  } catch (err) {
-    console.error("Failed to initialize physical Firebase SDK, falling back to Mock Mode:", err);
-    useRealFirebase = false;
-  }
-} else {
-  console.log("Starting app in HIGH-FIDELITY LOCAL STORAGE EMULATION mode (No live credentials).");
-}
+console.log("Starting app in HIGH-FIDELITY LOCAL STORAGE EMULATION mode (Real Firebase disabled).");
 
 export { useRealFirebase };
 export const db = dbInstance;
