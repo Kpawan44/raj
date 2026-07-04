@@ -14,7 +14,8 @@ import {
   Moon, 
   Sun,
   UserPlus,
-  X
+  X,
+  Brain
 } from 'lucide-react';
 import { Department, UserProfile, CompanyConfig } from '../types';
 import { isFirestoreOffline } from '../lib/firebase';
@@ -53,6 +54,7 @@ export default function Sidebar({
     { id: 'dashboard', label: 'Department Panel', icon: Factory },
     { id: 'all-orders', label: 'All Job Cards', icon: FileText },
     { id: 'timeline-live', label: 'Real-Time Tracking', icon: Activity },
+    { id: 'forecast', label: 'AI Production Forecast', icon: Brain },
     { id: 'reports', label: 'Reports & Analytics', icon: Layers },
   ];
 

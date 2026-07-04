@@ -36,6 +36,7 @@ import {
 import Sidebar from './components/Sidebar';
 import DashboardStats from './components/DashboardStats';
 import DepartmentOperations from './components/DepartmentOperations';
+import ForecastView from './components/ForecastView';
 import JobCardDetailsModal from './components/JobCardDetailsModal';
 import ScannerModal from './components/ScannerModal';
 import ReportView from './components/ReportView';
@@ -925,6 +926,13 @@ export default function App() {
               onAcceptMovement={handleAcceptMovement}
               onRejectMovement={handleRejectMovement}
               onSelectJobCard={setSelectedJob}
+            />
+          )}
+
+          {activeTab === 'forecast' && (
+            <ForecastView 
+              jobCards={jobCards} 
+              movements={movements} 
             />
           )}
 
