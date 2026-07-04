@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import { 
   Factory, 
   Bell, 
-  Scan, 
   Search, 
   Filter, 
   Download, 
@@ -21,7 +20,8 @@ import {
   ArrowLeft,
   FileSpreadsheet,
   Menu,
-  Trash2
+  Trash2,
+  Printer
 } from 'lucide-react';
 import { DBService, auth } from './lib/firebase';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus } from './types';
@@ -38,7 +38,6 @@ import DashboardStats from './components/DashboardStats';
 import DepartmentOperations from './components/DepartmentOperations';
 import ForecastView from './components/ForecastView';
 import JobCardDetailsModal from './components/JobCardDetailsModal';
-import ScannerModal from './components/ScannerModal';
 import ReportView from './components/ReportView';
 import AdminConsole from './components/AdminConsole';
 import TimelineVisual from './components/TimelineVisual';
@@ -82,7 +81,6 @@ export default function App() {
   
   // --- MODALS AND DRILLS ---
   const [selectedJob, setSelectedJob] = useState<JobCard | null>(null);
-  const [scannerOpen, setScannerOpen] = useState(false);
   const [showNotificationsDropdown, setShowNotificationsDropdown] = useState(false);
 
   // --- FILTERS TABLE ---
@@ -694,31 +692,14 @@ export default function App() {
                   </button>
                 </form>
 
-                {/* Simulated personnel quick credentials switches */}
-                <div className="border-t border-[#E2E8F0] pt-4">
-                  <div className="flex justify-between items-center mb-2.5">
-                    <label className="block text-[10px] text-[#3B82F6] font-bold uppercase tracking-wider">
-                      🛠️ Quick Log In (Simulate Personnel PIN)
-                    </label>
-                    <button
-                      onClick={() => { setIsRegistering(true); setAuthError(''); setRegSuccess(''); }}
-                      className="text-xs text-[#3B82F6] hover:underline font-extrabold flex items-center gap-1 cursor-pointer"
-                    >
-                      <UserPlus className="h-3.5 w-3.5" /> Manager Signup
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                    {users.slice(0, 6).map(user => (
-                      <button
-                        key={user.userId}
-                        onClick={() => handleDemoQuickLogin(user)}
-                        className="p-2 rounded bg-[#F8FAFC] hover:bg-[#EFF6FF] text-[10px] text-slate-700 border border-[#E2E8F0] transition text-left truncate hover:border-[#BFDBFE] cursor-pointer"
-                      >
-                        <strong className="text-[#1D4ED8]">{user.department}</strong>
-                        <span className="block text-[9px] text-slate-500 truncate mt-0.5">{user.name}</span>
-                      </button>
-                    ))}
-                  </div>
+                {/* Register/Signup Trigger link instead of Quick Login switches */}
+                <div className="border-t border-[#E2E8F0] pt-4 text-center">
+                  <button
+                    onClick={() => { setIsRegistering(true); setAuthError(''); setRegSuccess(''); }}
+                    className="text-xs text-[#3B82F6] hover:underline font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <UserPlus className="h-4 w-4" /> Create a Manager Account
+                  </button>
                 </div>
               </div>
             )}
@@ -739,13 +720,13 @@ export default function App() {
       {/* 1. SIDE NAVIGATION COLUMN Backdrop for mobile */}
       {sidebarOpen && (
         <div 
-          className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-40 lg:hidden animate-fade-in"
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-40 lg:hidden animate-fade-in print:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       )}
       
       <div className={`
-        fixed inset-y-0 left-0 z-50 transition-all duration-300 ease-in-out flex shrink-0 h-full
+        fixed inset-y-0 left-0 z-50 transition-all duration-300 ease-in-out flex shrink-0 h-full print:hidden
         lg:static lg:z-0 lg:translate-x-0
         ${sidebarOpen ? 'translate-x-0 w-[220px]' : '-translate-x-full w-[220px] lg:w-0 lg:opacity-0 lg:overflow-hidden'}
       `}>
@@ -822,14 +803,17 @@ export default function App() {
               </button>
             )}
 
-            {/* Camera QR Scanner Simulation Button */}
+
+
+            {/* Print Current View Button */}
             <button
-              onClick={() => setScannerOpen(true)}
+              onClick={() => window.print()}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-semibold transition cursor-pointer"
-              title="Align Job Card Barcode to local Scanner"
+              title="Print current page view or job card details"
+              id="btn_print_view"
             >
-              <Scan className="h-4 w-4 text-[#3B82F6]" />
-              <span>Barcode Scanner</span>
+              <Printer className="h-4 w-4 text-[#4F46E5] dark:text-[#818CF8]" />
+              <span>Print View</span>
             </button>
 
             {/* Notification Bell with counter */}
@@ -1282,13 +1266,7 @@ export default function App() {
       {/* 3. MODALS AND DETAILS OVERLAY DRAWERS */}
       {/* ======================================================== */}
       
-      {/* QR/Barcode scanner Modal */}
-      <ScannerModal 
-        isOpen={scannerOpen}
-        onClose={() => setScannerOpen(false)}
-        jobCards={jobCards}
-        onSelectJobCard={handleSelectJobByNo}
-      />
+
 
       {/* Job Card Detailed Drill overlay */}
       {selectedJob && (

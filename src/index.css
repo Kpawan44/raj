@@ -54,3 +54,71 @@ body {
   color: #7E22CE;
   border-color: #E9D5FF;
 }
+
+/* @media print custom overrides for pristine physical page rendering */
+@media print {
+  /* Override backgrounds to white and text to dark/high contrast */
+  html, body, #root, #root > div, main {
+    background: white !important;
+    color: #0F172A !important;
+    height: auto !important;
+    min-height: auto !important;
+    overflow: visible !important;
+    position: static !important;
+  }
+
+  /* Force hidden on interactive menus, filters, logs, headers, sidebars */
+  .print\:hidden,
+  header,
+  aside,
+  button,
+  form,
+  input,
+  select,
+  .no-print {
+    display: none !important;
+  }
+
+  /* Expand all grid tables, modals, and container wrappers for continuous flow */
+  .overflow-x-auto, 
+  .overflow-y-auto {
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+  }
+
+  /* Clean up margins and layout container rules */
+  main {
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Optimized printing of Job Card Details Modal if open */
+  body:has(#job-card-printable-area) #root > div > main,
+  body:has(#job-card-printable-area) #root > div > aside,
+  body:has(#job-card-printable-area) .fixed.inset-0:not(:has(#job-card-printable-area)) {
+    display: none !important;
+  }
+
+  body:has(#job-card-printable-area) .fixed.inset-0 {
+    position: static !important;
+    display: block !important;
+    background: transparent !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
+
+  body:has(#job-card-printable-area) .fixed.inset-0 > div {
+    position: static !important;
+    max-width: 100% !important;
+    width: 100% !important;
+    height: auto !important;
+    max-height: none !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: white !important;
+    color: black !important;
+    overflow: visible !important;
+  }
+}
+

@@ -701,6 +701,21 @@ export class DBService {
     if (useRealFirebase && db) {
       try {
         await deleteDoc(doc(db, 'mfr_job_cards', jobCardNo.toUpperCase()));
+        
+        // Cascade delete movements from Firestore
+        const movementsSnap = await getDocs(query(collection(db, 'mfr_movements'), where('jobCardNo', '==', jobCardNo)));
+        for (const docSnap of movementsSnap.docs) {
+          await deleteDoc(doc(db, 'mfr_movements', docSnap.id));
+        }
+
+        // Cascade delete notifications mentioning this job card
+        const notificationsSnap = await getDocs(collection(db, 'mfr_notifications'));
+        for (const docSnap of notificationsSnap.docs) {
+          const notif = docSnap.data();
+          if (notif.message && notif.message.toLowerCase().includes(jobCardNo.toLowerCase())) {
+            await deleteDoc(doc(db, 'mfr_notifications', docSnap.id));
+          }
+        }
       } catch (err: any) {
         handleFirestoreError(err, OperationType.DELETE, `mfr_job_cards/${jobCardNo.toUpperCase()}`);
         const shouldThrow = err && (
@@ -722,12 +737,24 @@ export class DBService {
     const updatedCards = cards.filter(c => c.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
     setLocalStorageItem('mfr_job_cards', updatedCards);
 
-    await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Deleted Job Card: ${jobCardNo}`);
+    // Cascade delete movements from local storage
+    const movements = await this.getMovements();
+    const updatedMovements = movements.filter(m => m.jobCardNo.toLowerCase() !== jobCardNo.toLowerCase());
+    setLocalStorageItem('mfr_movements', updatedMovements);
+
+    // Cascade delete notifications from local storage
+    const notifications = await this.getNotifications();
+    const updatedNotifications = notifications.filter(n => !n.message.toLowerCase().includes(jobCardNo.toLowerCase()));
+    setLocalStorageItem('mfr_notifications', updatedNotifications);
+
+    await this.logAction(userId, userName, 'DELETE_JOB_CARD', `Deleted Job Card: ${jobCardNo} and all related material transitions/notifications`);
   }
 
   static async deleteAllJobCards(userId: string, userName: string): Promise<void> {
     // 1. Update Local Storage offline cache first
     setLocalStorageItem('mfr_job_cards', []);
+    setLocalStorageItem('mfr_movements', []);
+    setLocalStorageItem('mfr_notifications', []);
 
     // 2. Write to physical Firestore
     if (useRealFirebase && db) {
@@ -736,12 +763,22 @@ export class DBService {
         for (const docSnap of querySnapshot.docs) {
           await deleteDoc(doc(db, 'mfr_job_cards', docSnap.id));
         }
+
+        const movementsSnap = await getDocs(collection(db, 'mfr_movements'));
+        for (const docSnap of movementsSnap.docs) {
+          await deleteDoc(doc(db, 'mfr_movements', docSnap.id));
+        }
+
+        const notificationsSnap = await getDocs(collection(db, 'mfr_notifications'));
+        for (const docSnap of notificationsSnap.docs) {
+          await deleteDoc(doc(db, 'mfr_notifications', docSnap.id));
+        }
       } catch (err) {
         handleFirestoreError(err, OperationType.DELETE, 'mfr_job_cards');
       }
     }
 
-    await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Deleted all job card entries from database`);
+    await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Deleted all job card entries, material movements, and notifications from database`);
   }
 
   // --- MATERIAL MOVEMENTS ---
