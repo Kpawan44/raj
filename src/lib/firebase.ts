@@ -1061,7 +1061,7 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     const list = await this.getNotifications();
     const updated = list.map(n => {
-      if (n.department === department || department === 'All') {
+      if (department === 'Admin' || department === 'All' || n.department === department || n.department === 'All') {
         return { ...n, read: true };
       }
       return n;
@@ -1072,7 +1072,7 @@ export class DBService {
     if (useRealFirebase && db) {
       try {
         for (const n of list) {
-          if ((n.department === department || department === 'All') && !n.read) {
+          if ((department === 'Admin' || department === 'All' || n.department === department || n.department === 'All') && !n.read) {
             await updateDoc(doc(db, 'mfr_notifications', n.notificationId), { read: true });
           }
         }

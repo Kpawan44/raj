@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Download, 
   Printer, 
@@ -10,7 +10,14 @@ import {
   Scale,
   TrendingUp,
   AlertTriangle,
-  CheckCircle2
+  CheckCircle2,
+  Mail,
+  Send,
+  Sparkles,
+  Inbox,
+  AlertCircle,
+  ExternalLink,
+  RefreshCw
 } from 'lucide-react';
 import { JobCard, MaterialMovement, Department } from '../types';
 import { getJobCardProcessMetrics } from '../lib/metrics';
@@ -31,13 +38,86 @@ type ReportType =
   | 'completed'
   | 'rejected'
   | 'movements'
-  | 'balance';
+  | 'balance'
+  | 'rejection_by_dept'
+  | 'email_triggers';
 
 export default function ReportView({ jobCards, movements }: ReportViewProps) {
   const [activeReport, setActiveReport] = useState<ReportType>('production');
   const [searchTerm, setSearchTerm] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+
+  // Automated Email Trigger States
+  const [outboxHistory, setOutboxHistory] = useState<any[]>([]);
+  const [isTriggering, setIsTriggering] = useState(false);
+  const [recipientInput, setRecipientInput] = useState('pawan.kummar16@gmail.com');
+  const [smtpConfigured, setSmtpConfigured] = useState(false);
+  const [selectedEmailRecord, setSelectedEmailRecord] = useState<any | null>(null);
+  const [emailSuccessMessage, setEmailSuccessMessage] = useState('');
+  const [emailErrorMessage, setEmailErrorMessage] = useState('');
+  const [previewTab, setPreviewTab] = useState<'insights' | 'email_html' | 'html_source'>('insights');
+
+  // Fetch email logs from outbox backend API
+  const fetchOutboxHistory = async () => {
+    try {
+      const response = await fetch('/api/sent-emails');
+      if (response.ok) {
+        const data = await response.json();
+        setOutboxHistory(data);
+        if (data.length > 0 && !selectedEmailRecord) {
+          setSelectedEmailRecord(data[0]);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch email outbox history:", e);
+    }
+  };
+
+  useEffect(() => {
+    fetchOutboxHistory();
+  }, [activeReport]);
+
+  const handleTriggerEmail = async () => {
+    setIsTriggering(true);
+    setEmailErrorMessage('');
+    setEmailSuccessMessage('');
+    try {
+      const response = await fetch('/api/trigger-daily-summary', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          jobCards,
+          movements,
+          recipient: recipientInput
+        })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        throw new Error(errData.details || "Failed to trigger daily email");
+      }
+
+      const data = await response.json();
+      setEmailSuccessMessage(`Daily automated email report successfully generated! ${data.smtpConfigured ? 'Transmitted to admin team inbox.' : 'Logged to local Outbox system for preview.'}`);
+      setSmtpConfigured(data.smtpConfigured);
+      
+      // Refresh outbox
+      await fetchOutboxHistory();
+      
+      // Select the newly generated log
+      if (data.record) {
+        setSelectedEmailRecord(data.record);
+      }
+    } catch (e: any) {
+      console.error(e);
+      setEmailErrorMessage(e.message || "An unexpected error occurred during report compilation.");
+    } finally {
+      setIsTriggering(false);
+    }
+  };
 
   // Define reports descriptors
   const reportOptions: { id: ReportType; label: string; desc: string }[] = [
@@ -51,8 +131,52 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
     { id: 'completed', label: 'Archived Completed Orders', desc: "Perfect run items fully shipped out" },
     { id: 'rejected', label: 'Rejected Orders Report', desc: "Orders flagged with rejection status" },
     { id: 'movements', label: 'Material Movement Log', desc: "Step-by-step chain of custody transfer ledger" },
-    { id: 'balance', label: 'Balance Quantity Audit', desc: "Formula calculations: Target vs Processed (Scrap analysis)" }
+    { id: 'balance', label: 'Balance Quantity Audit', desc: "Formula calculations: Target vs Processed (Scrap analysis)" },
+    { id: 'rejection_by_dept', label: 'Material Rejection Analysis', desc: "Department-level breakdown of processed vs rejected material to identify quality bottlenecks" },
+    { id: 'email_triggers', label: 'Automated Email Controls', desc: "Configure admin alerts, send automated summaries, and inspect daily outbox logs" }
   ];
+
+  const getRejectionStatsByDept = (filteredCards: JobCard[]) => {
+    const stats: Record<string, { processed: number; rejected: number }> = {
+      'Production': { processed: 0, rejected: 0 },
+      'Heat Treatment': { processed: 0, rejected: 0 },
+      'Plating': { processed: 0, rejected: 0 },
+      'Packing': { processed: 0, rejected: 0 },
+      'Store': { processed: 0, rejected: 0 }
+    };
+
+    filteredCards.forEach(jc => {
+      const m = getJobCardProcessMetrics(jc, movements);
+      
+      const isProdRejected = jc.status === 'Rejected' && jc.currentDepartment === 'Production';
+      stats['Production'].processed += jc.orderQty;
+      stats['Production'].rejected += isProdRejected ? jc.orderQty : 0;
+
+      if (jc.heatTreatmentRequired) {
+        stats['Heat Treatment'].processed += m.qtyReceivedFromProd;
+        stats['Heat Treatment'].rejected += m.htRejections;
+      }
+
+      stats['Plating'].processed += m.qtyReceivedAtPlating;
+      stats['Plating'].rejected += m.platingRejections;
+
+      stats['Packing'].processed += m.qtyReceivedAtPacking;
+      stats['Packing'].rejected += m.packingRejections;
+
+      stats['Store'].processed += m.qtyReceivedAtStore;
+      stats['Store'].rejected += jc.storeDetails?.rejectionQty || 0;
+    });
+
+    return Object.entries(stats).map(([dept, data]) => {
+      const pct = data.processed > 0 ? (data.rejected / data.processed) * 100 : 0;
+      return {
+        department: dept,
+        totalProcessedKg: Math.round(data.processed * 10) / 10,
+        totalRejectedKg: Math.round(data.rejected * 10) / 10,
+        rejectionPercentage: Math.round(pct * 100) / 100
+      };
+    });
+  };
 
   // Filters calculation
   const getFilteredData = () => {
@@ -240,6 +364,59 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
           };
         });
         break;
+      case 'rejection_by_dept': {
+        // Filter jobCards first so aggregation respects date filters and search filters
+        let cardList = [...jobCards];
+        if (searchTerm) {
+          const match = searchTerm.toLowerCase();
+          cardList = cardList.filter(c =>
+            c.jobCardNo.toLowerCase().includes(match) ||
+            c.partyName.toLowerCase().includes(match) ||
+            c.itemName.toLowerCase().includes(match) ||
+            (c.itemCode && c.itemCode.toLowerCase().includes(match))
+          );
+        }
+        if (startDate) {
+          const start = new Date(startDate);
+          cardList = cardList.filter(c => new Date(c.createdAt) >= start);
+        }
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          cardList = cardList.filter(c => new Date(c.createdAt) <= end);
+        }
+        
+        baseData = cardList.map(c => {
+          const m = getJobCardProcessMetrics(c, movements);
+          const isProdRejected = c.status === 'Rejected' && c.currentDepartment === 'Production';
+          const prodRejection = isProdRejected ? c.orderQty : 0;
+          const htRejection = m.htRejections;
+          const platingRejection = m.platingRejections;
+          const packingRejection = m.packingRejections;
+          const storeRejection = c.storeDetails?.rejectionQty || 0;
+          const totalRejected = prodRejection + htRejection + platingRejection + packingRejection + storeRejection;
+          const rejectionPct = c.orderQty > 0 ? (totalRejected / c.orderQty) * 100 : 0;
+
+          return {
+            jobCardNo: c.jobCardNo,
+            partyName: c.partyName,
+            itemName: c.itemName,
+            orderQtyKg: c.orderQty,
+            prodRejKg: prodRejection,
+            htRejKg: htRejection,
+            platingRejKg: platingRejection,
+            packingRejKg: packingRejection,
+            storeRejKg: storeRejection,
+            totalRejKg: Math.round(totalRejected * 10) / 10,
+            rejectionRate: `${Math.round(rejectionPct * 100) / 100}%`
+          };
+        });
+        break;
+      }
+    }
+
+    if (activeReport === 'rejection_by_dept') {
+      return baseData;
     }
 
     // 2. Filter by search filter
@@ -280,6 +457,33 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
 
   const filteredData = getFilteredData();
 
+  // Filter job cards for the department-level statistics
+  const getFilteredCardsForDept = () => {
+    let cardList = [...jobCards];
+    if (searchTerm) {
+      const match = searchTerm.toLowerCase();
+      cardList = cardList.filter(c =>
+        c.jobCardNo.toLowerCase().includes(match) ||
+        c.partyName.toLowerCase().includes(match) ||
+        c.itemName.toLowerCase().includes(match) ||
+        (c.itemCode && c.itemCode.toLowerCase().includes(match))
+      );
+    }
+    if (startDate) {
+      const start = new Date(startDate);
+      cardList = cardList.filter(c => new Date(c.createdAt) >= start);
+    }
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      cardList = cardList.filter(c => new Date(c.createdAt) <= end);
+    }
+    return cardList;
+  };
+
+  const filteredCardsForDept = getFilteredCardsForDept();
+  const deptRejectionStats = getRejectionStatsByDept(filteredCardsForDept);
+
   // Export to Excel simulation using clean download CSV encoder
   const handleExportExcel = () => {
     if (filteredData.length === 0) return;
@@ -317,7 +521,7 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
       
       {/* Search and Period filters bar */}
       <div className="bg-white dark:bg-slate-900 shadow-sm p-4 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col md:flex-row flex-wrap gap-4 items-center justify-between">
-        <div className="flex flex-wrap gap-3 items-center w-full md:w-auto">
+        <div className="flex flex-wrap gap-3 items-center w-full md:w-auto flex-1">
           {/* Label selector */}
           <div className="relative">
             <select
@@ -334,55 +538,59 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
             </select>
           </div>
 
-          <div className="relative flex-1 md:flex-initial min-w-[200px]">
-            <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
-            <input
-              type="text"
-              placeholder="Filter by Code, Name, Job..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="bg-slate-50 dark:bg-slate-850 pl-9 pr-3 py-2 text-xs text-slate-700 dark:text-slate-200 rounded-lg border border-slate-200 dark:border-slate-750 w-full focus:outline-none focus:border-[#3B82F6] font-sans"
-            />
-          </div>
+          {activeReport !== 'email_triggers' && (
+            <div className="relative flex-1 md:flex-initial min-w-[200px]">
+              <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Filter by Code, Name, Job..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="bg-slate-50 dark:bg-slate-850 pl-9 pr-3 py-2 text-xs text-slate-700 dark:text-slate-200 rounded-lg border border-slate-200 dark:border-slate-750 w-full focus:outline-none focus:border-[#3B82F6] font-sans"
+              />
+            </div>
+          )}
         </div>
 
         {/* Date picking section */}
-        <div className="flex flex-wrap gap-2.5 items-center w-full md:w-auto text-xs text-slate-500">
-          <Calendar className="h-4 w-4 text-slate-400" />
-          <input
-            type="date"
-            value={startDate}
-            onChange={(e) => setStartDate(e.target.value)}
-            className="bg-slate-50 dark:bg-slate-850 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-750 focus:outline-none focus:border-[#3B82F6] font-mono text-slate-700 dark:text-slate-200"
-          />
-          <span className="font-mono">to</span>
-          <input
-            type="date"
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-            className="bg-slate-50 dark:bg-slate-850 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-750 focus:outline-none focus:border-[#3B82F6] font-mono text-slate-700 dark:text-slate-200"
-          />
+        {activeReport !== 'email_triggers' && (
+          <div className="flex flex-wrap gap-2.5 items-center w-full md:w-auto text-xs text-slate-500">
+            <Calendar className="h-4 w-4 text-slate-400" />
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="bg-slate-50 dark:bg-slate-850 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-750 focus:outline-none focus:border-[#3B82F6] font-mono text-slate-700 dark:text-slate-200"
+            />
+            <span className="font-mono">to</span>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="bg-slate-50 dark:bg-slate-850 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-750 focus:outline-none focus:border-[#3B82F6] font-mono text-slate-700 dark:text-slate-200"
+            />
 
-          <div className="flex items-center gap-1.5 ml-auto md:ml-4">
-            <button
-              onClick={handleExportExcel}
-              disabled={filteredData.length === 0}
-              className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white disabled:bg-slate-200 disabled:text-slate-400 dark:disabled:bg-slate-800 font-bold px-3 py-2 rounded-lg transition-all"
-              title="Download Microsoft Excel (CSV)"
-            >
-              <FileSpreadsheet className="h-4 w-4" />
-              <span>Excel Export</span>
-            </button>
-            <button
-              onClick={() => window.print()}
-              disabled={filteredData.length === 0}
-              className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:bg-slate-200 disabled:text-slate-400 dark:disabled:bg-slate-800 font-bold px-3 py-2 rounded-lg transition-all"
-            >
-              <Printer className="h-4 w-4" />
-              <span>PDF Link</span>
-            </button>
+            <div className="flex items-center gap-1.5 ml-auto md:ml-4">
+              <button
+                onClick={handleExportExcel}
+                disabled={filteredData.length === 0}
+                className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-500 text-white disabled:bg-slate-200 disabled:text-slate-400 dark:disabled:bg-slate-800 font-bold px-3 py-2 rounded-lg transition-all"
+                title="Download Microsoft Excel (CSV)"
+              >
+                <FileSpreadsheet className="h-4 w-4" />
+                <span>Excel Export</span>
+              </button>
+              <button
+                onClick={() => window.print()}
+                disabled={filteredData.length === 0}
+                className="flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 disabled:bg-slate-200 disabled:text-slate-400 dark:disabled:bg-slate-800 font-bold px-3 py-2 rounded-lg transition-all"
+              >
+                <Printer className="h-4 w-4" />
+                <span>PDF Link</span>
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Selected Report Title Description */}
@@ -395,65 +603,544 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
         </p>
       </div>
 
-      {/* Grid records counts */}
-      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
-          {filteredData.length === 0 ? (
-            <div className="text-center p-8 space-y-2">
-              <span className="text-2xl">🔍</span>
-              <p className="text-sm font-semibold text-slate-500">No records found matching audit criteria</p>
-              <p className="text-xs text-slate-400">Try loosening your search keywords or date range bounds</p>
+      {activeReport === 'rejection_by_dept' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in print:grid-cols-2">
+          
+          {/* Dedicated Search & Filter Section for Rejection Analysis */}
+          <div className="lg:col-span-3 bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
+            <div className="w-full md:w-auto">
+              <h5 className="text-xs font-extrabold text-[#4F46E5] dark:text-[#818CF8] uppercase tracking-wider flex items-center gap-1.5">
+                <Search className="h-4 w-4 text-indigo-500" />
+                <span>Filter Rejection Metrics</span>
+              </h5>
+              <p className="text-[11px] text-slate-400 mt-1">
+                Filter department metrics and records list instantly by Job Card number or Item Name
+              </p>
             </div>
-          ) : (
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-slate-50 dark:bg-slate-950 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider border-b border-slate-200 dark:border-slate-800">
-                  {Object.keys(filteredData[0]).map((h) => (
-                    <th key={h} className="py-3.5 px-4 font-mono font-bold">
-                      {h.replace(/([A-Z])/g, ' $1').trim()}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {filteredData.map((row, idx) => (
-                  <tr 
-                    key={idx} 
-                    className="border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-slate-50/50 dark:hover:bg-slate-850/40 text-xs transition-colors"
-                  >
-                    {Object.values(row).map((val: any, valIdx) => {
-                      // Custom formatter
-                      let displayVal = String(val);
-                      if (typeof val === 'boolean') {
-                        displayVal = val ? 'True' : 'False';
-                      }
+            
+            <div className="relative w-full md:w-[360px]">
+              <Search className="absolute left-3.5 top-2.5 h-3.5 w-3.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search by Job Card No. or Item Name..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="bg-slate-50 dark:bg-slate-850 pl-10 pr-10 py-1.5 text-xs text-slate-700 dark:text-slate-200 rounded-xl border border-slate-200 dark:border-slate-750 w-full focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] font-sans"
+              />
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-3 top-2 p-0.5 rounded-full hover:bg-slate-200 dark:hover:bg-slate-750 text-slate-400 hover:text-slate-600 transition"
+                  title="Clear search"
+                >
+                  <span className="text-[10px] font-bold">✕</span>
+                </button>
+              )}
+            </div>
+          </div>
+          
+          {/* Bottleneck Summary & High-level insights Card */}
+          <div className="lg:col-span-3 bg-slate-50 dark:bg-slate-950 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="p-3 bg-indigo-50 dark:bg-indigo-950/40 rounded-xl border border-indigo-100 dark:border-indigo-900/40 shrink-0 text-2xl">
+                ⚠️
+              </div>
+              <div>
+                <h5 className="text-sm font-bold text-slate-800 dark:text-white uppercase tracking-wider">
+                  Quality & Rejection Bottleneck Analysis
+                </h5>
+                <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
+                  Real-time department-level material yield tracking. High rejection percentages indicate process anomalies, tooling wear, or temperature calibration errors.
+                </p>
+              </div>
+            </div>
+            
+            {/* Top Bottleneck Badge */}
+            {(() => {
+              const maxRej = [...deptRejectionStats].sort((a, b) => b.rejectionPercentage - a.rejectionPercentage)[0];
+              if (maxRej && maxRej.rejectionPercentage > 0) {
+                return (
+                  <div className="bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/30 p-3 rounded-xl flex items-center gap-2.5 shrink-0 w-full md:w-auto">
+                    <AlertTriangle className="h-5 w-5 text-rose-500 animate-pulse" />
+                    <div className="text-left">
+                      <p className="text-[10px] text-rose-500 font-extrabold uppercase tracking-wider">Current Bottleneck</p>
+                      <p className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200">
+                        {maxRej.department}: <span className="text-rose-600 dark:text-rose-400">{maxRej.rejectionPercentage}%</span>
+                      </p>
+                    </div>
+                  </div>
+                );
+              } else {
+                return (
+                  <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 p-3 rounded-xl flex items-center gap-2.5 shrink-0 w-full md:w-auto">
+                    <CheckCircle2 className="h-5 w-5 text-emerald-500" />
+                    <div className="text-left">
+                      <p className="text-[10px] text-emerald-500 font-extrabold uppercase tracking-wider">Flawless Operation</p>
+                      <p className="text-xs font-mono font-bold text-slate-800 dark:text-slate-200">No rejections reported</p>
+                    </div>
+                  </div>
+                );
+              }
+            })()}
+          </div>
 
-                      // Is it date values? Formatter
-                      if (typeof val === 'string' && val.includes('T') && !isNaN(Date.parse(val))) {
-                        displayVal = new Date(val).toLocaleDateString([], {month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit'});
-                      }
+          {/* Department Cards */}
+          {deptRejectionStats.map((row: any) => {
+            const pct = row.rejectionPercentage;
+            let statusColor = "bg-emerald-500";
+            let textColor = "text-emerald-700 dark:text-emerald-400";
+            let borderColor = "border-emerald-100 dark:border-emerald-850";
+            let bgColor = "bg-emerald-50/30 dark:bg-emerald-950/10";
+            let severity = "Optimal";
 
-                      return (
-                        <td key={valIdx} className="py-3 px-4 font-mono text-slate-700 dark:text-slate-300">
-                          {displayVal}
-                        </td>
-                      );
-                    })}
+            if (pct > 5) {
+              statusColor = "bg-rose-500";
+              textColor = "text-rose-700 dark:text-rose-400";
+              borderColor = "border-rose-150 dark:border-rose-850";
+              bgColor = "bg-rose-50/20 dark:bg-rose-950/5";
+              severity = "Critical Bottleneck";
+            } else if (pct > 2) {
+              statusColor = "bg-amber-500";
+              textColor = "text-amber-700 dark:text-amber-400";
+              borderColor = "border-amber-150 dark:border-amber-850";
+              bgColor = "bg-amber-50/20 dark:bg-amber-950/5";
+              severity = "Moderate Attention";
+            }
+
+            return (
+              <div 
+                key={row.department}
+                className={`bg-white dark:bg-slate-900 border ${borderColor} rounded-2xl p-5 shadow-sm flex flex-col justify-between space-y-4`}
+              >
+                {/* Header info */}
+                <div className="flex justify-between items-start">
+                  <div>
+                    <h5 className="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest">
+                      Department
+                    </h5>
+                    <h3 className="text-sm font-extrabold text-slate-800 dark:text-white mt-0.5">
+                      {row.department}
+                    </h3>
+                  </div>
+                  <span className={`text-[9px] font-extrabold uppercase px-2.5 py-1 rounded-full border ${borderColor} ${bgColor} ${textColor}`}>
+                    {severity}
+                  </span>
+                </div>
+
+                {/* Progress bar */}
+                <div className="space-y-1.5">
+                  <div className="flex justify-between text-[11px] font-mono">
+                    <span className="text-slate-400">Rejection Rate</span>
+                    <strong className="text-slate-800 dark:text-slate-200">{pct}%</strong>
+                  </div>
+                  <div className="h-2 w-full bg-slate-100 dark:bg-slate-800 rounded-full overflow-hidden">
+                    <div 
+                      className={`h-full ${statusColor} rounded-full transition-all duration-500`}
+                      style={{ width: `${Math.min(100, pct || 0)}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Weights info */}
+                <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-100 dark:border-slate-850 font-mono text-[10.5px]">
+                  <div>
+                    <span className="text-slate-400 block uppercase">Processed</span>
+                    <strong className="text-slate-800 dark:text-slate-200 text-xs">
+                      {row.totalProcessedKg} KG
+                    </strong>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-slate-400 block uppercase">Rejected</span>
+                    <strong className="text-rose-600 dark:text-rose-400 text-xs">
+                      {row.totalRejectedKg} KG
+                    </strong>
+                  </div>
+                </div>
+
+              </div>
+            );
+          })}
+
+        </div>
+      )}
+
+      {/* Automated Email Controls View Console */}
+      {activeReport === 'email_triggers' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in pb-12 print:hidden">
+          {/* LEFT: Control Center & Mail logs */}
+          <div className="lg:col-span-4 flex flex-col gap-6">
+            
+            {/* Control Panel */}
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-4">
+              <div>
+                <h5 className="text-[10px] font-extrabold text-[#4F46E5] dark:text-[#818CF8] uppercase tracking-wider flex items-center gap-1.5">
+                  <Sparkles className="h-4 w-4 text-indigo-500" />
+                  <span>Cloud Function Emulator</span>
+                </h5>
+                <h3 className="text-sm font-extrabold text-slate-800 dark:text-white mt-1">
+                  Daily Summary Dispatch
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Compile live database records and prompt Gemini to dispatch a structured executive summary to the administration team.
+                </p>
+              </div>
+
+              {/* Status indicator */}
+              <div className="p-3 rounded-xl border border-dashed text-[11px] space-y-2 bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 font-mono">SMTP Relay State:</span>
+                  {smtpConfigured ? (
+                    <span className="text-[8.5px] font-extrabold text-emerald-600 bg-emerald-50 dark:bg-emerald-950/20 px-2 py-0.5 rounded-full border border-emerald-100 dark:border-emerald-900/30">
+                      LIVE RELAY
+                    </span>
+                  ) : (
+                    <span className="text-[8.5px] font-extrabold text-indigo-600 bg-indigo-50 dark:bg-indigo-950/20 px-2 py-0.5 rounded-full border border-indigo-100 dark:border-indigo-900/30">
+                      LOCAL OUTBOX
+                    </span>
+                  )}
+                </div>
+                <p className="text-[10px] text-slate-400 font-sans leading-relaxed">
+                  {smtpConfigured 
+                    ? "Emails are sent immediately through your configured live production SMTP server details."
+                    : "SMTP credentials are not active. Summaries are rendered and stored locally inside the Outbox simulator below."}
+                </p>
+              </div>
+
+              {/* Recipient Email Address Input */}
+              <div className="space-y-1">
+                <label className="text-[10.5px] font-extrabold text-slate-400 uppercase font-mono block">
+                  Recipient Admin Email
+                </label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                  <input
+                    type="email"
+                    value={recipientInput}
+                    onChange={(e) => setRecipientInput(e.target.value)}
+                    placeholder="pawan.kummar16@gmail.com"
+                    className="bg-slate-50 dark:bg-slate-850 pl-9 pr-3 py-1.5 text-xs text-slate-750 dark:text-slate-200 rounded-xl border border-slate-200 dark:border-slate-750 w-full focus:outline-none focus:ring-2 focus:ring-[#4F46E5]/20 focus:border-[#4F46E5] font-mono"
+                  />
+                </div>
+              </div>
+
+              {/* Trigger Button */}
+              <button
+                type="button"
+                onClick={handleTriggerEmail}
+                disabled={isTriggering}
+                className="w-full flex items-center justify-center gap-2 bg-[#4F46E5] hover:bg-[#4338CA] disabled:bg-slate-200 dark:disabled:bg-slate-800 text-white disabled:text-slate-450 text-xs font-extrabold py-2 px-4 rounded-xl transition duration-200 shadow-sm cursor-pointer"
+              >
+                {isTriggering ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin text-indigo-200" />
+                    <span>Compiling Report...</span>
+                  </>
+                ) : (
+                  <>
+                    <Send className="h-3.5 w-3.5" />
+                    <span>Trigger Cloud Function Now</span>
+                  </>
+                )}
+              </button>
+
+              {emailSuccessMessage && (
+                <div className="p-3 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-900/30 rounded-xl text-[11px] text-emerald-600 dark:text-emerald-400 leading-normal">
+                  {emailSuccessMessage}
+                </div>
+              )}
+
+              {emailErrorMessage && (
+                <div className="p-3 bg-rose-50 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/30 rounded-xl text-[11px] text-rose-600 dark:text-rose-400 leading-normal">
+                  {emailErrorMessage}
+                </div>
+              )}
+
+            </div>
+
+            {/* Outbox Logs history */}
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 shadow-sm space-y-3 flex flex-col h-[340px]">
+              <div>
+                <h3 className="text-xs font-extrabold text-slate-800 dark:text-white flex items-center gap-1.5 uppercase tracking-wider">
+                  <Inbox className="h-4 w-4 text-slate-400" />
+                  <span>Outbox Logs ({outboxHistory.length})</span>
+                </h3>
+                <p className="text-[10px] text-slate-400 mt-0.5 font-sans">
+                  History of triggered operations summaries and yield digests.
+                </p>
+              </div>
+
+              <div className="space-y-2 overflow-y-auto pr-1 flex-1">
+                {outboxHistory.length === 0 ? (
+                  <div className="text-center py-12 text-slate-400 text-xs font-mono">
+                    No logs found. Trigger the function above to compile report.
+                  </div>
+                ) : (
+                  outboxHistory.map((item) => {
+                    const isSelected = selectedEmailRecord?.id === item.id;
+                    const dateStr = new Date(item.timestamp).toLocaleString([], {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit'
+                    });
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => setSelectedEmailRecord(item)}
+                        className={`w-full text-left p-3 rounded-xl border transition flex flex-col gap-1 ${
+                          isSelected
+                            ? 'bg-slate-50 dark:bg-slate-850 border-indigo-200 dark:border-indigo-900/50 ring-2 ring-indigo-500/10'
+                            : 'bg-white dark:bg-slate-900 border-slate-150 dark:border-slate-800 hover:bg-slate-50/50 dark:hover:bg-slate-850/30'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <span className="text-[9px] font-mono text-slate-400">{dateStr}</span>
+                          <span className={`text-[8px] font-extrabold px-1.5 py-0.5 rounded-md ${
+                            item.status === 'sent'
+                              ? 'bg-emerald-50 dark:bg-emerald-950/20 text-emerald-600 border border-emerald-100'
+                              : item.status === 'simulated'
+                              ? 'bg-purple-50 dark:bg-purple-950/20 text-purple-600 border border-purple-100'
+                              : 'bg-amber-50 dark:bg-amber-950/20 text-amber-600 border border-amber-100'
+                          }`}>
+                            {item.status.toUpperCase()}
+                          </span>
+                        </div>
+                        <h4 className="text-[11px] font-bold text-slate-700 dark:text-slate-200 line-clamp-1 font-sans">
+                          {item.subject}
+                        </h4>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+
+          </div>
+
+          {/* RIGHT: Selected report preview panel */}
+          <div className="lg:col-span-8">
+            {selectedEmailRecord ? (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm flex flex-col h-full min-h-[500px]">
+                
+                {/* Header detail */}
+                <div className="p-5 border-b border-slate-150 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/30">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                    <div>
+                      <span className="text-[9px] font-mono text-slate-450 dark:text-slate-500 uppercase tracking-widest font-bold block">
+                        EMAIL DISPATCH LOG • ID: {selectedEmailRecord.id}
+                      </span>
+                      <h2 className="text-sm font-extrabold text-slate-800 dark:text-white mt-1">
+                        {selectedEmailRecord.subject}
+                      </h2>
+                      <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 mt-2 font-sans">
+                        <span className="font-bold">Recipient:</span>
+                        <code className="text-[10px] font-mono bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded text-slate-600 dark:text-slate-300">
+                          {selectedEmailRecord.recipient}
+                        </code>
+                        <span className="text-slate-300 dark:text-slate-700">|</span>
+                        <span>Date: {new Date(selectedEmailRecord.timestamp).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Tabs selector */}
+                  <div className="flex items-center gap-1.5 mt-5 border-b border-slate-200 dark:border-slate-800 -mb-5">
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab('insights')}
+                      className={`px-4 py-2 text-xs font-extrabold border-b-2 transition ${
+                        previewTab === 'insights'
+                          ? 'border-[#4F46E5] text-[#4F46E5] dark:text-[#818CF8]'
+                          : 'border-transparent text-slate-400 hover:text-slate-600'
+                      }`}
+                    >
+                      Executive Highlights
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab('email_html')}
+                      className={`px-4 py-2 text-xs font-extrabold border-b-2 transition ${
+                        previewTab === 'email_html'
+                          ? 'border-[#4F46E5] text-[#4F46E5] dark:text-[#818CF8]'
+                          : 'border-transparent text-slate-400 hover:text-slate-600'
+                      }`}
+                    >
+                      Interactive Email Simulator
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPreviewTab('html_source')}
+                      className={`px-4 py-2 text-xs font-extrabold border-b-2 transition ${
+                        previewTab === 'html_source'
+                          ? 'border-[#4F46E5] text-[#4F46E5] dark:text-[#818CF8]'
+                          : 'border-transparent text-slate-400 hover:text-slate-600'
+                      }`}
+                    >
+                      Raw HTML Source
+                    </button>
+                  </div>
+                </div>
+
+                {/* Tab content area */}
+                <div className="p-5 flex-1 overflow-y-auto">
+                  {previewTab === 'insights' && (
+                    <div className="space-y-6 animate-fade-in">
+                      
+                      {/* Executive summary block */}
+                      <div className="space-y-2">
+                        <h4 className="text-[10px] font-extrabold text-slate-450 dark:text-slate-500 uppercase tracking-widest font-mono">
+                          Executive Overview
+                        </h4>
+                        <div className="bg-indigo-50/10 dark:bg-indigo-950/10 border border-indigo-100/50 dark:border-indigo-900/30 p-4 rounded-xl">
+                          <p className="text-xs text-slate-750 dark:text-slate-300 leading-relaxed font-sans">
+                            {selectedEmailRecord.executiveSummary}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Critical Bottlenecks block */}
+                      <div className="space-y-2.5">
+                        <h4 className="text-[10px] font-extrabold text-slate-450 dark:text-slate-500 uppercase tracking-widest font-mono flex items-center gap-1.5">
+                          <AlertCircle className="h-4 w-4 text-rose-500" />
+                          <span>Detected Anomalies & Alerts</span>
+                        </h4>
+                        {selectedEmailRecord.criticalBottlenecks && selectedEmailRecord.criticalBottlenecks.length > 0 ? (
+                          <div className="grid grid-cols-1 gap-2">
+                            {selectedEmailRecord.criticalBottlenecks.map((b: string, i: number) => (
+                              <div key={i} className="flex items-start gap-2.5 bg-rose-50/20 dark:bg-rose-950/5 border border-rose-100/45 dark:border-rose-900/20 p-3 rounded-xl text-xs text-slate-750 dark:text-slate-350 leading-normal">
+                                <span className="text-rose-500 font-extrabold font-mono mt-0.5">⚠️</span>
+                                <span className="font-sans">{b}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400 font-sans italic">No critical anomalies detected in active operations.</p>
+                        )}
+                      </div>
+
+                      {/* Recommended strategic actions block */}
+                      <div className="space-y-2.5">
+                        <h4 className="text-[10px] font-extrabold text-slate-450 dark:text-slate-500 uppercase tracking-widest font-mono flex items-center gap-1.5">
+                          <Sparkles className="h-4 w-4 text-emerald-500" />
+                          <span>Recommended Operational Adjustments</span>
+                        </h4>
+                        {selectedEmailRecord.recommendedActions && selectedEmailRecord.recommendedActions.length > 0 ? (
+                          <div className="grid grid-cols-1 gap-2">
+                            {selectedEmailRecord.recommendedActions.map((act: string, i: number) => (
+                              <div key={i} className="flex items-start gap-2.5 bg-emerald-50/10 dark:bg-emerald-950/5 border border-emerald-100/45 dark:border-emerald-900/20 p-3 rounded-xl text-xs text-slate-750 dark:text-slate-350 leading-normal">
+                                <span className="text-emerald-500 font-extrabold font-mono mt-0.5">✓</span>
+                                <span className="font-sans">{act}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-slate-400 font-sans italic">All systems performing optimally. No corrective actions proposed.</p>
+                        )}
+                      </div>
+
+                    </div>
+                  )}
+
+                  {previewTab === 'email_html' && (
+                    <div className="border border-slate-200 dark:border-slate-850 rounded-xl overflow-hidden h-[480px] flex flex-col bg-white animate-fade-in">
+                      <div className="bg-slate-100 dark:bg-slate-800 p-2 border-b border-slate-200 dark:border-slate-700 text-[10px] text-slate-500 font-mono flex items-center justify-between">
+                        <span>📧 Live Email Sandbox Iframe (Isolated Sandbox)</span>
+                        <span className="text-[9px] uppercase font-bold text-[#4F46E5]">Active Rendering</span>
+                      </div>
+                      <iframe
+                        title="Live Email Preview"
+                        srcDoc={selectedEmailRecord.htmlBody}
+                        className="w-full flex-1 border-none bg-white"
+                        sandbox="allow-same-origin"
+                      />
+                    </div>
+                  )}
+
+                  {previewTab === 'html_source' && (
+                    <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 font-mono text-[10px] text-slate-300 overflow-x-auto whitespace-pre h-[480px] leading-relaxed select-all animate-fade-in">
+                      {selectedEmailRecord.htmlBody}
+                    </div>
+                  )}
+                </div>
+
+              </div>
+            ) : (
+              <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-12 text-center h-full flex flex-col justify-center items-center space-y-3 min-h-[500px]">
+                <span className="text-3xl text-slate-300 dark:text-slate-700">📧</span>
+                <h3 className="text-sm font-extrabold text-slate-700 dark:text-slate-300">No Email Log Selected</h3>
+                <p className="text-xs text-slate-400 max-w-sm">
+                  Click on any compiled outbox report in the left ledger or trigger the automated daily summary cloud function to preview results.
+                </p>
+              </div>
+            )}
+          </div>
+
+        </div>
+      )}
+
+      {/* Grid records counts */}
+      {activeReport !== 'email_triggers' && (
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+          <div className="overflow-x-auto">
+            {filteredData.length === 0 ? (
+              <div className="text-center p-8 space-y-2">
+                <span className="text-2xl">🔍</span>
+                <p className="text-sm font-semibold text-slate-500">No records found matching audit criteria</p>
+                <p className="text-xs text-slate-400">Try loosening your search keywords or date range bounds</p>
+              </div>
+            ) : (
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-slate-50 dark:bg-slate-950 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider border-b border-slate-200 dark:border-slate-800">
+                    {Object.keys(filteredData[0]).map((h) => (
+                      <th key={h} className="py-3.5 px-4 font-mono font-bold">
+                        {h.replace(/([A-Z])/g, ' $1').trim()}
+                      </th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {filteredData.map((row, idx) => (
+                    <tr 
+                      key={idx} 
+                      className="border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-slate-50/50 dark:hover:bg-slate-850/40 text-xs transition-colors"
+                    >
+                      {Object.values(row).map((val: any, valIdx) => {
+                        // Custom formatter
+                        let displayVal = String(val);
+                        if (typeof val === 'boolean') {
+                          displayVal = val ? 'True' : 'False';
+                        }
+
+                        // Is it date values? Formatter
+                        if (typeof val === 'string' && val.includes('T') && !isNaN(Date.parse(val))) {
+                          displayVal = new Date(val).toLocaleDateString([], {month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit'});
+                        }
+
+                        return (
+                          <td key={valIdx} className="py-3 px-4 font-mono text-slate-700 dark:text-slate-300">
+                            {displayVal}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+          
+          {/* Dynamic footer tally counts */}
+          {filteredData.length > 0 && (
+            <div className="p-4 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 flex justify-between font-mono">
+              <span>Total Records Listed: {filteredData.length}</span>
+              <span>Ref: Site-1 Operations</span>
+            </div>
           )}
         </div>
-        
-        {/* Dynamic footer tally counts */}
-        {filteredData.length > 0 && (
-          <div className="p-4 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400 flex justify-between font-mono">
-            <span>Total Records Listed: {filteredData.length}</span>
-            <span>Ref: Site-1 Operations</span>
-          </div>
-        )}
-      </div>
+      )}
 
     </div>
   );

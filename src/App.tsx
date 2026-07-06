@@ -21,7 +21,8 @@ import {
   FileSpreadsheet,
   Menu,
   Trash2,
-  Printer
+  Printer,
+  QrCode
 } from 'lucide-react';
 import { DBService, auth } from './lib/firebase';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus } from './types';
@@ -38,6 +39,7 @@ import DashboardStats from './components/DashboardStats';
 import DepartmentOperations from './components/DepartmentOperations';
 import ForecastView from './components/ForecastView';
 import JobCardDetailsModal from './components/JobCardDetailsModal';
+import ScannerModal from './components/ScannerModal';
 import ReportView from './components/ReportView';
 import AdminConsole from './components/AdminConsole';
 import TimelineVisual from './components/TimelineVisual';
@@ -81,6 +83,7 @@ export default function App() {
   
   // --- MODALS AND DRILLS ---
   const [selectedJob, setSelectedJob] = useState<JobCard | null>(null);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const [showNotificationsDropdown, setShowNotificationsDropdown] = useState(false);
 
   // --- FILTERS TABLE ---
@@ -805,6 +808,17 @@ export default function App() {
 
 
 
+            {/* QR Code Scanner Button */}
+            <button
+              onClick={() => setScannerOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-semibold transition cursor-pointer print:hidden"
+              title="Scan or simulate physical Job Card QR labels"
+              id="btn_qr_scanner"
+            >
+              <QrCode className="h-4 w-4 text-[#4F46E5] dark:text-[#818CF8]" />
+              <span>QR Scanner</span>
+            </button>
+
             {/* Print Current View Button */}
             <button
               onClick={() => window.print()}
@@ -1265,6 +1279,14 @@ export default function App() {
       {/* ======================================================== */}
       {/* 3. MODALS AND DETAILS OVERLAY DRAWERS */}
       {/* ======================================================== */}
+      
+      {/* QR Code Scanner Modal */}
+      <ScannerModal 
+        isOpen={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        jobCards={jobCards}
+        onSelectJobCard={handleSelectJobByNo}
+      />
       
 
 

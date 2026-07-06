@@ -1,4 +1,5 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import QRCode from 'qrcode';
 import { 
   X, 
   Printer, 
@@ -43,6 +44,39 @@ export default function JobCardDetailsModal({
   const [isDragActive, setIsDragActive] = useState(false);
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [showWorkshopQR, setShowWorkshopQR] = useState(false);
+  const qrCanvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (showWorkshopQR && qrCanvasRef.current && jobCard.jobCardNo) {
+      QRCode.toCanvas(
+        qrCanvasRef.current,
+        jobCard.jobCardNo,
+        {
+          width: 256,
+          margin: 1,
+          color: {
+            dark: '#000000',
+            light: '#FFFFFF'
+          }
+        },
+        (error) => {
+          if (error) console.error('Error generating workshop QR Code:', error);
+        }
+      );
+    }
+  }, [showWorkshopQR, jobCard.jobCardNo]);
+
+  const handleDownloadQR = () => {
+    if (qrCanvasRef.current) {
+      const url = qrCanvasRef.current.toDataURL('image/png');
+      const link = document.createElement('a');
+      link.download = `QR_${jobCard.jobCardNo}.png`;
+      link.href = url;
+      link.click();
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -150,8 +184,16 @@ export default function JobCardDetailsModal({
           
           <div className="flex items-center gap-2">
             <button
+              onClick={() => setShowWorkshopQR(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-[#4F46E5] hover:bg-[#4338CA] dark:bg-[#6366F1] dark:hover:bg-[#4F46E5] rounded-lg transition-all shadow-sm cursor-pointer"
+              id="btn_modal_generate_qr"
+            >
+              <QrCode className="h-4 w-4" />
+              Generate QR
+            </button>
+            <button
               onClick={handlePrint}
-              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 dark:text-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg transition-all"
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 dark:text-slate-200 dark:bg-slate-900 dark:hover:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg transition-all cursor-pointer"
             >
               <Printer className="h-4 w-4" />
               Print Job Card
@@ -258,6 +300,16 @@ export default function JobCardDetailsModal({
                   <span className="ml-1">Share</span>
                 </button>
               </div>
+
+              <button
+                type="button"
+                onClick={() => setShowWorkshopQR(true)}
+                className="w-full mt-3 flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md text-[10px] font-extrabold text-[#4F46E5] bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/40 dark:text-[#818CF8] dark:hover:bg-indigo-900/40 border border-indigo-200/50 dark:border-indigo-800/30 transition duration-200 cursor-pointer"
+                title="Generate physical Job Card QR label containing the raw ID"
+              >
+                <QrCode className="h-3.5 w-3.5" />
+                <span>Generate Workshop QR</span>
+              </button>
             </div>
           </div>
 
@@ -606,6 +658,89 @@ export default function JobCardDetailsModal({
           </div>
         </div>
       </div>
+
+      {showWorkshopQR && (
+        <div className="fixed inset-0 bg-slate-900/90 backdrop-blur-md flex items-center justify-center z-[60] p-4 print:bg-white animate-fade-in" id="workshop-qr-container">
+          <div className="bg-white dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-sm w-full p-6 shadow-2xl flex flex-col items-center justify-center relative print:border-none print:shadow-none print:p-0">
+            
+            {/* Close Button (Hidden on Print) */}
+            <button
+              onClick={() => setShowWorkshopQR(false)}
+              className="absolute top-4 right-4 p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-850 text-slate-400 hover:text-slate-600 dark:hover:text-white transition cursor-pointer print:hidden"
+              title="Close QR details"
+            >
+              <X className="h-5 w-5" />
+            </button>
+
+            {/* Header Description */}
+            <div className="text-center mb-4 print:hidden">
+              <h4 className="text-xs font-extrabold text-[#4F46E5] dark:text-[#818CF8] uppercase tracking-widest flex items-center justify-center gap-1.5">
+                <QrCode className="h-4 w-4" />
+                Workshop QR Label
+              </h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                Scan this QR code with the production webcam scanner to load data instantly
+              </p>
+            </div>
+
+            {/* Printable Area Wrapper */}
+            <div className="bg-white p-6 rounded-2xl border-2 border-slate-150 dark:border-slate-850 flex flex-col items-center justify-center text-center w-full shadow-inner print:border-none print:p-0 print:shadow-none">
+              
+              <h2 className="text-sm font-extrabold text-slate-900 font-mono tracking-tight uppercase mb-0.5">
+                {jobCard.jobCardNo}
+              </h2>
+              <p className="text-[10px] text-slate-500 font-medium mb-4 uppercase tracking-wider print:mb-2">
+                Factory Lot Identification Label
+              </p>
+
+              {/* QR Code Canvas */}
+              <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-sm flex items-center justify-center mb-3 print:border-none print:shadow-none print:p-0">
+                <canvas ref={qrCanvasRef} className="w-48 h-48 max-w-full" />
+              </div>
+
+              {/* Dynamic details for quick verification */}
+              <div className="space-y-1 font-mono text-[10px] text-slate-600 w-full border-t border-slate-100 pt-3 mt-1 print:border-slate-300">
+                <div className="flex justify-between">
+                  <span className="text-slate-400 uppercase">Item Spec:</span>
+                  <strong className="text-slate-900 truncate max-w-[180px]">{jobCard.itemName}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400 uppercase">Party:</span>
+                  <strong className="text-slate-900 truncate max-w-[180px]">{jobCard.partyName}</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-400 uppercase">Target Qty:</span>
+                  <strong className="text-slate-900">{jobCard.orderQty} KG</strong>
+                </div>
+              </div>
+            </div>
+
+            {/* Interactive Actions (Hidden on Print) */}
+            <div className="grid grid-cols-2 gap-2 mt-5 w-full print:hidden">
+              <button
+                onClick={handleDownloadQR}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold text-slate-700 bg-slate-50 hover:bg-slate-100 dark:text-slate-200 dark:bg-slate-900 dark:hover:bg-slate-850 border border-slate-200 dark:border-slate-800 transition duration-200 cursor-pointer"
+                title="Download QR code image for printing or sharing"
+              >
+                <span>💾 Download PNG</span>
+              </button>
+              <button
+                onClick={() => window.print()}
+                className="flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 dark:bg-indigo-500 dark:hover:bg-indigo-600 transition duration-200 cursor-pointer"
+                title="Print this workshop label specifically"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                <span>Print Label</span>
+              </button>
+            </div>
+
+            <p className="text-[9.5px] text-center text-slate-400 mt-4 leading-normal print:hidden">
+              💡 <strong>Usage:</strong> Stick this label onto the physical tray or container. Production supervisors can scan this using the built-in webcam scanner for error-free weight entry.
+            </p>
+
+          </div>
+        </div>
+      )}
     </div>
   );
 }

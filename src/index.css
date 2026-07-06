@@ -120,5 +120,22 @@ body {
     color: black !important;
     overflow: visible !important;
   }
+
+  /* Specific print configuration when the dedicated Workshop QR Code is active */
+  body:has(#workshop-qr-container) #root,
+  body:has(#workshop-qr-container) #job-card-printable-area,
+  body:has(#workshop-qr-container) .fixed.inset-0:not(:has(#workshop-qr-container)) {
+    display: none !important;
+  }
+
+  body:has(#workshop-qr-container) #workshop-qr-container {
+    background: white !important;
+    position: static !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    padding: 0 !important;
+    overflow: visible !important;
+  }
 }
 
