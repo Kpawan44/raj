@@ -14,7 +14,9 @@ import {
   Warehouse,
   Database,
   Package,
-  Building2
+  Building2,
+  FileSpreadsheet,
+  ExternalLink
 } from 'lucide-react';
 import { UserProfile, AuditLog, Department, JobCard, MaterialMovement, CompanyConfig } from '../types';
 import { getJobCardProcessMetrics } from '../lib/metrics';
@@ -32,6 +34,11 @@ interface AdminConsoleProps {
   onRefreshJobs?: () => void;
   companyConfig?: CompanyConfig | null;
   onRefreshCompany?: () => void;
+  isSheetsActive?: boolean;
+  sheetsDetails?: { name: string; url: string; spreadsheetId: string };
+  onOpenSheetsModal?: () => void;
+  onDisconnectSheets?: () => void;
+  onOpenSheetsInspector?: () => void;
 }
 
 export default function AdminConsole({ 
@@ -45,7 +52,12 @@ export default function AdminConsole({
   movements = [],
   onRefreshJobs,
   companyConfig = null,
-  onRefreshCompany
+  onRefreshCompany,
+  isSheetsActive = false,
+  sheetsDetails,
+  onOpenSheetsModal,
+  onDisconnectSheets,
+  onOpenSheetsInspector
 }: AdminConsoleProps) {
   const [activeSubTab, setActiveSubTab] = useState<'users' | 'settings' | 'audit' | 'jobs' | 'stock' | 'company'>('users');
   const [searchTerm, setSearchTerm] = useState('');
@@ -128,6 +140,73 @@ export default function AdminConsole({
   return (
     <div className="space-y-6">
       
+      {/* Google Sheets Syncer Status and Direct Link for Admin */}
+      {isSheetsActive && sheetsDetails?.url ? (
+        <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/50 rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 animate-fade-in shadow-sm">
+          <div className="flex items-center gap-3">
+            <div className="h-10 w-10 rounded-xl bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
+              <FileSpreadsheet className="h-5 w-5" />
+            </div>
+            <div>
+              <h4 className="text-xs font-bold text-slate-800 dark:text-slate-100">Live Google Sheets Sync Active</h4>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                Connected logbook: <span className="font-semibold text-slate-700 dark:text-slate-200">{sheetsDetails.name || "Factory Material Flow Ledger"}</span>
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            {onOpenSheetsInspector && (
+              <button
+                onClick={onOpenSheetsInspector}
+                className="flex-1 sm:flex-initial text-center bg-emerald-600 hover:bg-emerald-500 text-white font-sans font-bold text-xs py-2 px-4 rounded-lg flex items-center justify-center gap-1.5 shadow-sm transition-all cursor-pointer"
+                title="View actual spreadsheet columns and rows in-app"
+              >
+                <FileSpreadsheet className="h-3.5 w-3.5" />
+                <span>Inspect Live Sheet</span>
+              </button>
+            )}
+            <a
+              href={sheetsDetails.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-1 sm:flex-initial text-center bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 font-sans font-bold text-xs py-2 px-4 rounded-lg flex items-center justify-center gap-1.5 shadow-sm transition-all"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              <span>Open Google Sheet</span>
+            </a>
+            {onDisconnectSheets && (
+              <button
+                onClick={onDisconnectSheets}
+                className="text-xs bg-red-50 hover:bg-red-100 dark:bg-red-950/20 text-red-600 dark:text-red-400 py-2 px-3 rounded-lg font-semibold transition"
+                title="Disconnect from Google Sheets"
+              >
+                Disconnect
+              </button>
+            )}
+          </div>
+        </div>
+      ) : (
+        onOpenSheetsModal && (
+          <div className="bg-slate-50 dark:bg-slate-900/40 border border-slate-200 dark:border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-sm">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-xl bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
+                <FileSpreadsheet className="h-5 w-5" />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-slate-750 dark:text-slate-350">Google Sheets Logbook Offline</h4>
+                <p className="text-[11px] text-slate-400">Link your Google Sheets account to sync all production transactions, material movements, and rejections.</p>
+              </div>
+            </div>
+            <button
+              onClick={onOpenSheetsModal}
+              className="w-full sm:w-auto bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 font-bold text-xs py-2 px-4 rounded-lg transition"
+            >
+              Link Google Sheets
+            </button>
+          </div>
+        )
+      )}
+
       {/* Sub tabs header */}
       <div className="flex border-b border-slate-200 dark:border-slate-800">
         <button

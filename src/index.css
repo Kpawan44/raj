@@ -57,8 +57,9 @@ body {
 
 /* @media print custom overrides for pristine physical page rendering */
 @media print {
-  /* Override backgrounds to white and text to dark/high contrast */
+  /* Override backgrounds to white and text to dark/high contrast, and disable flexbox layout constraints */
   html, body, #root, #root > div, main {
+    display: block !important;
     background: white !important;
     color: #0F172A !important;
     height: auto !important;
@@ -95,7 +96,7 @@ body {
 
   /* Optimized printing of Job Card Details Modal if open */
   body:has(#job-card-printable-area) #root > div > main,
-  body:has(#job-card-printable-area) #root > div > aside,
+  body:has(#job-card-printable-area) #root > div > div:not(:has(#job-card-printable-area)),
   body:has(#job-card-printable-area) .fixed.inset-0:not(:has(#job-card-printable-area)) {
     display: none !important;
   }
@@ -122,19 +123,32 @@ body {
   }
 
   /* Specific print configuration when the dedicated Workshop QR Code is active */
-  body:has(#workshop-qr-container) #root,
-  body:has(#workshop-qr-container) #job-card-printable-area,
-  body:has(#workshop-qr-container) .fixed.inset-0:not(:has(#workshop-qr-container)) {
+  body:has(#workshop-qr-container) #root > div > main,
+  body:has(#workshop-qr-container) #root > div > div:not(:has(#workshop-qr-container)),
+  body:has(#workshop-qr-container) .fixed.inset-0 > div:not(#workshop-qr-container) {
     display: none !important;
+  }
+
+  body:has(#workshop-qr-container) .fixed.inset-0 {
+    position: static !important;
+    display: block !important;
+    background: transparent !important;
+    padding: 0 !important;
+    overflow: visible !important;
   }
 
   body:has(#workshop-qr-container) #workshop-qr-container {
     background: white !important;
     position: static !important;
     display: flex !important;
+    flex-direction: column !important;
     align-items: center !important;
     justify-content: center !important;
     padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: auto !important;
     overflow: visible !important;
   }
 }

@@ -404,6 +404,11 @@ export default function DepartmentOperations({
   // B. Job cards currently assigned to this department
   const activeDepartmentJobs = jobCards.filter(c => {
     if (c.completed) return false;
+    // If the job card is pending custody acceptance, it shouldn't show up in the operational/processing queue
+    // until the department operator accepts it. Dispatch can see all tracking states.
+    if (c.status === 'Pending Acceptance' && activeDept !== 'Dispatch') {
+      return false;
+    }
     // Dispatch owns tracking when completed or creating, otherwise matches exactly
     if (activeDept === 'Dispatch') {
       return true;

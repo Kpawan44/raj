@@ -34,6 +34,12 @@ import {
   initializeSpreadsheet, 
   disconnectSheets 
 } from './lib/googleSheets';
+import { 
+  exportJobCards, 
+  exportMaterialMovements, 
+  exportAuditLogs, 
+  exportDepartmentUpdates 
+} from './lib/csvExport';
 import Sidebar from './components/Sidebar';
 import DashboardStats from './components/DashboardStats';
 import DepartmentOperations from './components/DepartmentOperations';
@@ -43,6 +49,7 @@ import ScannerModal from './components/ScannerModal';
 import ReportView from './components/ReportView';
 import AdminConsole from './components/AdminConsole';
 import TimelineVisual from './components/TimelineVisual';
+import GoogleSheetViewer from './components/GoogleSheetViewer';
 import { getJobCardProcessMetrics } from './lib/metrics';
 
 export default function App() {
@@ -79,7 +86,9 @@ export default function App() {
   const [sheetsDetails, setSheetsDetails] = useState(getSpreadsheetDetails());
   const [isSheetsActive, setIsSheetsActive] = useState(isSheetsConnected());
   const [showSheetsModal, setShowSheetsModal] = useState(false);
+  const [sheetsModalTab, setSheetsModalTab] = useState<'cloud' | 'offline'>('cloud');
   const [sheetsFeedback, setSheetsFeedback] = useState('');
+  const [showSheetsInspector, setShowSheetsInspector] = useState(false);
   
   // --- MODALS AND DRILLS ---
   const [selectedJob, setSelectedJob] = useState<JobCard | null>(null);
@@ -548,7 +557,7 @@ export default function App() {
 
   const handleMarkAllNotifsRead = async () => {
     if (!activeDepartment) return;
-    await DBService.markAllNotificationsRead(activeDepartment);
+    await DBService.clearAllNotifications(activeDepartment);
     setShowNotificationsDropdown(false);
   };
 
@@ -817,17 +826,6 @@ export default function App() {
             >
               <QrCode className="h-4 w-4 text-[#4F46E5] dark:text-[#818CF8]" />
               <span>QR Scanner</span>
-            </button>
-
-            {/* Print Current View Button */}
-            <button
-              onClick={() => window.print()}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-semibold transition cursor-pointer"
-              title="Print current page view or job card details"
-              id="btn_print_view"
-            >
-              <Printer className="h-4 w-4 text-[#4F46E5] dark:text-[#818CF8]" />
-              <span>Print View</span>
             </button>
 
             {/* Notification Bell with counter */}
@@ -1270,6 +1268,11 @@ export default function App() {
               onRefreshJobs={refreshAllStates}
               companyConfig={companyConfig}
               onRefreshCompany={refreshAllStates}
+              isSheetsActive={isSheetsActive}
+              sheetsDetails={sheetsDetails}
+              onOpenSheetsModal={() => setShowSheetsModal(true)}
+              onDisconnectSheets={handleDisconnectGoogleSheets}
+              onOpenSheetsInspector={() => setShowSheetsInspector(true)}
             />
           )}
 
@@ -1320,46 +1323,135 @@ export default function App() {
                 <FileSpreadsheet className="h-6 w-6" id="header_sheets_icon" />
               </div>
               <div>
-                <h3 className="font-bold text-slate-850 dark:text-slate-100 text-sm">Google Sheets Logbook Syncer</h3>
-                <p className="text-[11px] text-slate-400 font-medium">Real-time ledger accounting for fastener production flows</p>
+                <h3 className="font-bold text-slate-850 dark:text-slate-100 text-sm">Spreadsheet Logs & Exporter</h3>
+                <p className="text-[11px] text-slate-400 font-medium">Manage cloud syncer and offline Excel-ready spreadsheet files</p>
               </div>
             </div>
 
-            <div className="space-y-4 text-xs text-slate-600 dark:text-slate-400 leading-relaxed font-sans">
-              <p>
-                Link your Google Sheets account to sync all transactions, movements, and rejections dynamically:
-              </p>
-              
-              <ul className="list-disc pl-5 space-y-2 text-slate-500 font-sans">
-                <li>Records new Customer Job Cards & Route Targets automatically.</li>
-                <li>Logs step-by-step Department records (Heat Treatment, Plating, Packing, Warehouse).</li>
-                <li>Calculates and logs Furnace, Coating, and Boxing rejections (KG weight metrics).</li>
-                <li>Inserts audit action timestamps and personnel sign-off names.</li>
-              </ul>
+            {/* Tabs for Google Sheets vs Local Excel/CSV export */}
+            <div className="flex border-b border-slate-200 dark:border-slate-800 mb-5 font-sans text-xs">
+              <button
+                onClick={() => setSheetsModalTab('cloud')}
+                className={`flex-1 pb-2.5 font-bold border-b-2 text-center transition cursor-pointer ${
+                  sheetsModalTab === 'cloud'
+                    ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
+                    : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-350'
+                }`}
+              >
+                ☁️ Google Sheets (Cloud Sync)
+              </button>
+              <button
+                onClick={() => setSheetsModalTab('offline')}
+                className={`flex-1 pb-2.5 font-bold border-b-2 text-center transition cursor-pointer ${
+                  sheetsModalTab === 'offline'
+                    ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
+                    : 'border-transparent text-slate-400 hover:text-slate-600 dark:hover:text-slate-350'
+                }`}
+              >
+                📊 Excel Ledger Export (Offline)
+              </button>
+            </div>
 
-              {sheetsFeedback && (
-                <div className="p-3 bg-blue-50 dark:bg-blue-950/30 text-[#3B82F6] dark:text-blue-400 rounded-lg text-xs font-semibold border border-blue-200 dark:border-blue-900/40 flex items-center gap-2 font-mono">
-                  <span className="h-2 w-2 rounded-full bg-blue-500 animate-ping shrink-0" />
-                  <span>{sheetsFeedback}</span>
-                </div>
-              )}
-
-              <div className="pt-2 flex flex-col gap-2">
-                <button
-                  onClick={handleConnectGoogleSheets}
-                  className="w-full bg-[#107C41] hover:bg-[#0B592E] text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 shadow-sm transition uppercase tracking-wider text-[11px] font-mono cursor-pointer border border-[#0B5927]"
-                  id="btn_auth_sheets"
-                >
-                  <FileSpreadsheet className="h-4 w-4" />
-                  <span>Link via Google Account</span>
-                </button>
-                <p className="text-[9.5px] text-center text-slate-450 font-light pt-1">
-                  Secure OAuth token integration. Google Sheets permission is sandbox restricted to spreadsheets created by this app.
+            {sheetsModalTab === 'cloud' ? (
+              <div className="space-y-4 text-xs text-slate-600 dark:text-slate-400 leading-relaxed font-sans">
+                <p>
+                  Link your Google Sheets account to sync all transactions, movements, and rejections dynamically:
                 </p>
+                
+                <ul className="list-disc pl-5 space-y-2 text-slate-500 font-sans">
+                  <li>Records new Customer Job Cards & Route Targets automatically.</li>
+                  <li>Logs step-by-step Department records (Heat Treatment, Plating, Packing, Warehouse).</li>
+                  <li>Calculates and logs Furnace, Coating, and Boxing rejections (KG weight metrics).</li>
+                  <li>Inserts audit action timestamps and personnel sign-off names.</li>
+                </ul>
+
+                {sheetsFeedback && (
+                  <div className="p-3 bg-blue-50 dark:bg-blue-950/30 text-[#3B82F6] dark:text-blue-400 rounded-lg text-xs font-semibold border border-blue-200 dark:border-blue-900/40 flex items-center gap-2 font-mono">
+                    <span className="h-2 w-2 rounded-full bg-blue-500 animate-ping shrink-0" />
+                    <span>{sheetsFeedback}</span>
+                  </div>
+                )}
+
+                <div className="pt-2 flex flex-col gap-2">
+                  <button
+                    onClick={handleConnectGoogleSheets}
+                    className="w-full bg-[#107C41] hover:bg-[#0B592E] text-white font-bold py-2.5 px-4 rounded-lg flex items-center justify-center gap-2 shadow-sm transition uppercase tracking-wider text-[11px] font-mono cursor-pointer border border-[#0B5927]"
+                    id="btn_auth_sheets"
+                  >
+                    <FileSpreadsheet className="h-4 w-4" />
+                    <span>Link via Google Account</span>
+                  </button>
+                  <p className="text-[9.5px] text-center text-slate-450 font-light pt-1">
+                    Secure OAuth token integration. Google Sheets permission is sandbox restricted to spreadsheets created by this app.
+                  </p>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="space-y-4 text-xs leading-relaxed font-sans">
+                <p className="text-slate-600 dark:text-slate-400">
+                  Generate and download standard offline Excel-ready spreadsheet files of any data collection instantly:
+                </p>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <button
+                    onClick={() => exportJobCards(jobCards)}
+                    className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
+                  >
+                    <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
+                      📑 Job Cards Ledger
+                    </span>
+                    <span className="text-[10px] text-slate-400">Download customer orders and line statuses.</span>
+                  </button>
+
+                  <button
+                    onClick={() => exportDepartmentUpdates(jobCards)}
+                    className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
+                  >
+                    <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
+                      ⚡ Process & Rejections
+                    </span>
+                    <span className="text-[10px] text-slate-400">Download logs of hardness, temperature, plating and packing.</span>
+                  </button>
+
+                  <button
+                    onClick={() => exportMaterialMovements(movements)}
+                    className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
+                  >
+                    <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
+                      🔄 Custody & Movements
+                    </span>
+                    <span className="text-[10px] text-slate-400">Download the complete material transfer trail logs.</span>
+                  </button>
+
+                  <button
+                    onClick={() => exportAuditLogs(auditLogs)}
+                    className="flex flex-col items-start p-3 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50 text-left transition cursor-pointer"
+                  >
+                    <span className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5 mb-1 text-[11.5px]">
+                      🛡️ Actions & Audits
+                    </span>
+                    <span className="text-[10px] text-slate-400">Download staff logins and database update log trails.</span>
+                  </button>
+                </div>
+
+                <div className="pt-3 border-t border-slate-100 dark:border-slate-800 text-center">
+                  <p className="text-[10px] text-slate-400">
+                    No sign-in required. Downloads are processed entirely inside your local sandbox.
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
         </div>
+      )}
+
+      {/* Google Sheets Live Data Inspector Overlay Modal */}
+      {showSheetsInspector && (
+        <GoogleSheetViewer
+          onClose={() => setShowSheetsInspector(false)}
+          spreadsheetName={sheetsDetails.name || undefined}
+          spreadsheetUrl={sheetsDetails.url || undefined}
+        />
       )}
 
     </div>

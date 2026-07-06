@@ -17,7 +17,7 @@ import {
   limit 
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig } from '../types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus } from '../types';
 import { 
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
@@ -29,6 +29,7 @@ import {
 const isPlaceholder = 
   !firebaseConfig || 
   firebaseConfig.apiKey === 'placeholder-api-key' || 
+  firebaseConfig.apiKey === 'AIzaSyBYIcP0N_iqhPwj3T20szRq49pLgFkUyc8' ||
   !firebaseConfig.apiKey;
 
 export enum OperationType {
@@ -77,7 +78,19 @@ let dbInstance: any = null;
 let authInstance: any = null;
 let useRealFirebase = false;
 
-console.log("Starting app in HIGH-FIDELITY LOCAL STORAGE EMULATION mode (Real Firebase disabled).");
+if (!isPlaceholder) {
+  try {
+    const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
+    dbInstance = getFirestore(app);
+    authInstance = getAuth(app);
+    useRealFirebase = true;
+    console.log("Real Firebase initialized successfully!");
+  } catch (error) {
+    console.error("Failed to initialize real Firebase:", error);
+  }
+} else {
+  console.log("Starting app in HIGH-FIDELITY LOCAL STORAGE EMULATION mode (Real Firebase disabled).");
+}
 
 export { useRealFirebase };
 export const db = dbInstance;
@@ -586,6 +599,7 @@ export class DBService {
     
     const newJob: JobCard = {
       ...job,
+      status: 'Pending Acceptance', // set to Pending Acceptance because an unaccepted movement has been created!
       createdBy: creatorName,
       jobCardNo,
       orderNo,
@@ -597,12 +611,29 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     cards.unshift(newJob);
     setLocalStorageItem('mfr_job_cards', cards);
+
+    // Spawn an initial Material Movement from Dispatch to Production
+    const movements = await this.getMovements();
+    const newMovementId = `M-${2000 + movements.length + 1}`;
+    const initialMovement: MaterialMovement = {
+      movementId: newMovementId,
+      jobCardNo,
+      fromDepartment: 'Dispatch',
+      toDepartment: 'Production',
+      quantity: job.orderQty,
+      transferBy: creatorName,
+      transferDate: new Date().toISOString(),
+      accepted: false,
+      remarks: 'Order registered. Dispatching raw material and job ticket to Production.'
+    };
+    movements.unshift(initialMovement);
+    setLocalStorageItem('mfr_movements', movements);
     
     // Send notifications to Production
     await this.createNotification({
       department: 'Production',
       title: 'New Production Queue Item',
-      message: `Job Card ${jobCardNo} generated for ${job.partyName}. Quantity: ${job.orderQty} KG.`,
+      message: `Job Card ${jobCardNo} generated for ${job.partyName}. Quantity: ${job.orderQty} KG. Pending material acceptance.`,
       userId: 'all_production'
     });
 
@@ -610,6 +641,7 @@ export class DBService {
     if (useRealFirebase && db) {
       try {
         await setDoc(doc(db, 'mfr_job_cards', jobCardNo), newJob);
+        await setDoc(doc(db, 'mfr_movements', newMovementId), initialMovement);
       } catch (err: any) {
         handleFirestoreError(err, OperationType.WRITE, `mfr_job_cards/${jobCardNo}`);
         const shouldThrow = err && (
@@ -630,6 +662,7 @@ export class DBService {
     
     // Log to Google Sheets
     logJobCardToSheets(newJob).catch(err => console.warn('Google Sheets log failed: ', err));
+    logMaterialMovementToSheets(initialMovement).catch(err => console.warn('Google Sheets movement log failed: ', err));
 
     return newJob;
   }
@@ -917,9 +950,11 @@ export class DBService {
         });
       }
     } else {
-      // Set to in-process inside the target department
+      // Set to appropriate state inside the target department
+      // If entering Production, start as Pending to let them initiate the run, otherwise In Process.
+      const targetStatus = mov.toDepartment === 'Production' ? 'Pending' : 'In Process';
       await this.updateJobCard(mov.jobCardNo, {
-        status: 'In Process',
+        status: targetStatus as JobCardStatus,
         currentDepartment: mov.toDepartment as Department,
         currentQty: mov.quantity // update quantity to the accepted batch
       }, acceptedByUserId, acceptedByName);
@@ -1078,6 +1113,31 @@ export class DBService {
         }
       } catch (err) {
         handleFirestoreError(err, OperationType.UPDATE, 'mfr_notifications');
+      }
+    }
+  }
+
+  static async clearAllNotifications(department: Department | 'Admin' | 'All'): Promise<void> {
+    // 1. Update Local Storage offline cache first
+    const list = await this.getNotifications();
+    const remaining = list.filter(n => {
+      if (department === 'Admin' || department === 'All') {
+        return false;
+      }
+      return n.department !== department && n.department !== 'All';
+    });
+    setLocalStorageItem('mfr_notifications', remaining);
+
+    // 2. Write to physical Firestore
+    if (useRealFirebase && db) {
+      try {
+        for (const n of list) {
+          if (department === 'Admin' || department === 'All' || n.department === department || n.department === 'All') {
+            await deleteDoc(doc(db, 'mfr_notifications', n.notificationId));
+          }
+        }
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, 'mfr_notifications');
       }
     }
   }

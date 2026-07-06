@@ -90,10 +90,27 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
       setCameraInitialized(true);
     } catch (err: any) {
       console.error('Failed to initialize webcam qr-scanner', err);
-      setCameraError(
-        err.message || 
-        "Webcam permissions denied, or another application is using the camera. Please check your browser's frame security policies."
-      );
+      const errMsg = err.message || String(err);
+      if (
+        errMsg.includes('NotFoundError') || 
+        errMsg.includes('Requested device not found') || 
+        errMsg.includes('no video input') ||
+        err.name === 'NotFoundError' ||
+        err.name === 'DevicesNotFoundError'
+      ) {
+        setCameraError(
+          "No physical webcam/camera device was found on this system. Please use the 'Scanner Sim' or 'Manual Match' tab instead."
+        );
+      } else if (errMsg.includes('NotAllowedError') || errMsg.includes('Permission denied') || err.name === 'NotAllowedError') {
+        setCameraError(
+          "Camera permission denied by the browser. Please grant camera permission or check your security frame policies."
+        );
+      } else {
+        setCameraError(
+          err.message || 
+          "Webcam permissions denied, or another application is using the camera. Please check your browser's frame security policies."
+        );
+      }
     }
   };
 
@@ -123,6 +140,26 @@ export default function ScannerModal({ isOpen, onClose, jobCards, onSelectJobCar
   // Manage Camera startup based on Tab Selection and Modal Open State
   useEffect(() => {
     if (isOpen) {
+      const checkCameraPresence = async () => {
+        try {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+            setActiveTab('simulator');
+            setCameraError("Camera APIs are blocked or not supported in this browser context (e.g., non-secure contexts or inside an iframe).");
+            return;
+          }
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const hasVideoInput = devices.some(device => device.kind === 'videoinput');
+          if (!hasVideoInput) {
+            setActiveTab('simulator');
+            setCameraError("No physical webcam/camera detected on this system. Defaulting to Scanner Simulator.");
+          }
+        } catch (e) {
+          console.warn("Failed to check camera presence:", e);
+        }
+      };
+
+      checkCameraPresence();
+
       if (activeTab === 'camera') {
         // Wait a tick for DOM element to mount
         const timer = setTimeout(() => {
