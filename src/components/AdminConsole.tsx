@@ -81,6 +81,28 @@ export default function AdminConsole({
   const [selectedJobNos, setSelectedJobNos] = useState<string[]>([]);
   const [selectedAuditLogIds, setSelectedAuditLogIds] = useState<string[]>([]);
 
+  // --- NON-BLOCKING LOCAL TOASTS & CONFIRMATIONS ---
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void | Promise<void>;
+    confirmText?: string;
+    cancelText?: string;
+    requireText?: string;
+  } | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(prev => prev?.message === message ? null : prev);
+    }, 4500);
+  };
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void | Promise<void>, confirmText = 'Confirm', cancelText = 'Cancel', requireText?: string) => {
+    setConfirmDialog({ title, message, onConfirm, confirmText, cancelText, requireText });
+  };
+
   const isManager = currentUser?.role === 'admin';
 
   const [mountError, setMountError] = useState<string | null>(null);
@@ -175,28 +197,32 @@ export default function AdminConsole({
 
   const handleBulkDeleteJobs = async () => {
     if (!isManager) {
-      alert('Only administrators are authorized to perform bulk deletions.');
+      showToast('Only administrators are authorized to perform bulk deletions.', 'error');
       return;
     }
     if (selectedJobNos.length === 0) {
-      alert('No job cards selected.');
+      showToast('No job cards selected.', 'error');
       return;
     }
 
-    if (window.confirm(`Are you sure you want to permanently delete the ${selectedJobNos.length} selected job cards? This action is completely irreversible!`)) {
-      try {
-        for (const jobCardNo of selectedJobNos) {
-          await DBService.deleteJobCard(jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+    showConfirm(
+      "Bulk Delete Job Cards",
+      `Are you sure you want to permanently delete the ${selectedJobNos.length} selected job cards? This action is completely irreversible, and all related material transitions and notifications will be deleted!`,
+      async () => {
+        try {
+          for (const jobCardNo of selectedJobNos) {
+            await DBService.deleteJobCard(jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+          }
+          onLogAction('BULK_DELETE_JOBS', `Bulk deleted ${selectedJobNos.length} job cards: [${selectedJobNos.join(', ')}]`);
+          setSelectedJobNos([]);
+          if (onRefreshJobs) onRefreshJobs();
+          showToast(`Successfully deleted ${selectedJobNos.length} job cards.`, 'success');
+        } catch (err: any) {
+          console.error("Bulk delete jobs failed", err);
+          showToast(`Failed to complete bulk deletion of job cards: ${err instanceof Error ? err.message : String(err)}`, 'error');
         }
-        onLogAction('BULK_DELETE_JOBS', `Bulk deleted ${selectedJobNos.length} job cards: [${selectedJobNos.join(', ')}]`);
-        setSelectedJobNos([]);
-        if (onRefreshJobs) onRefreshJobs();
-        alert(`Successfully deleted ${selectedJobNos.length} job cards.`);
-      } catch (err: any) {
-        console.error("Bulk delete jobs failed", err);
-        alert(`Failed to complete bulk deletion of job cards: ${err instanceof Error ? err.message : String(err)}`);
       }
-    }
+    );
   };
 
   // Bulk action handlers for Audit Logs
@@ -219,90 +245,102 @@ export default function AdminConsole({
 
   const handleBulkDeleteLogs = async () => {
     if (!isManager) {
-      alert('Only administrators are authorized to perform bulk deletions.');
+      showToast('Only administrators are authorized to perform bulk deletions.', 'error');
       return;
     }
     if (selectedAuditLogIds.length === 0) {
-      alert('No audit logs selected.');
+      showToast('No audit logs selected.', 'error');
       return;
     }
 
-    if (window.confirm(`Are you sure you want to permanently delete the ${selectedAuditLogIds.length} selected audit logs?`)) {
-      try {
-        for (const logId of selectedAuditLogIds) {
-          await DBService.deleteAuditLog(logId);
+    showConfirm(
+      "Bulk Delete Audit Logs",
+      `Are you sure you want to permanently delete the ${selectedAuditLogIds.length} selected audit logs?`,
+      async () => {
+        try {
+          for (const logId of selectedAuditLogIds) {
+            await DBService.deleteAuditLog(logId);
+          }
+          onLogAction('BULK_DELETE_AUDIT_LOGS', `Bulk deleted ${selectedAuditLogIds.length} audit logs`);
+          setSelectedAuditLogIds([]);
+          if (onRefreshJobs) onRefreshJobs(); // forces refresh of audit logs state
+          showToast(`Successfully deleted ${selectedAuditLogIds.length} audit logs.`, 'success');
+        } catch (err: any) {
+          console.error("Bulk delete logs failed", err);
+          showToast(`Failed to complete bulk deletion of audit logs: ${err instanceof Error ? err.message : String(err)}`, 'error');
         }
-        onLogAction('BULK_DELETE_AUDIT_LOGS', `Bulk deleted ${selectedAuditLogIds.length} audit logs`);
-        setSelectedAuditLogIds([]);
-        if (onRefreshJobs) onRefreshJobs(); // forces refresh of audit logs state
-        alert(`Successfully deleted ${selectedAuditLogIds.length} audit logs.`);
-      } catch (err: any) {
-        console.error("Bulk delete logs failed", err);
-        alert(`Failed to complete bulk deletion of audit logs: ${err instanceof Error ? err.message : String(err)}`);
       }
-    }
+    );
   };
 
   const handleBulkDelete = async () => {
     if (!isManager) {
-      alert('Only administrators are authorized to perform bulk deletions.');
+      showToast('Only administrators are authorized to perform bulk deletions.', 'error');
       return;
     }
     const eligibleIds = selectedUserIds.filter(id => id !== currentUser?.userId);
     if (eligibleIds.length === 0) {
-      alert('No eligible users selected for deletion.');
+      showToast('No eligible users selected for deletion.', 'error');
       return;
     }
 
-    if (window.confirm(`Are you sure you want to permanently delete the ${eligibleIds.length} selected user profiles? This action cannot be undone.`)) {
-      try {
-        for (const userId of eligibleIds) {
-          const u = users.find(user => user.userId === userId);
-          if (u) {
-            await onDeleteUser(userId, u.name);
+    showConfirm(
+      "Bulk Delete User Profiles",
+      `Are you sure you want to permanently delete the ${eligibleIds.length} selected user profiles? This action cannot be undone.`,
+      async () => {
+        try {
+          for (const userId of eligibleIds) {
+            const u = users.find(user => user.userId === userId);
+            if (u) {
+              await onDeleteUser(userId, u.name);
+            }
           }
+          onLogAction('BULK_DELETE_USERS', `Bulk deleted ${eligibleIds.length} users: [${eligibleIds.join(', ')}]`);
+          setSelectedUserIds([]);
+          showToast(`Successfully deleted ${eligibleIds.length} users.`, 'success');
+        } catch (err: any) {
+          console.error("Bulk deletion failed", err);
+          showToast(`Failed to complete bulk deletion: ${err instanceof Error ? err.message : String(err)}`, 'error');
         }
-        onLogAction('BULK_DELETE_USERS', `Bulk deleted ${eligibleIds.length} users: [${eligibleIds.join(', ')}]`);
-        setSelectedUserIds([]);
-        alert(`Successfully deleted ${eligibleIds.length} users.`);
-      } catch (err: any) {
-        console.error("Bulk deletion failed", err);
-        alert(`Failed to complete bulk deletion: ${err instanceof Error ? err.message : String(err)}`);
       }
-    }
+    );
   };
 
   const handleBulkRoleUpdate = async (newRole: 'staff' | 'admin') => {
     if (!isManager) {
-      alert('Only administrators are authorized to perform bulk updates.');
+      showToast('Only administrators are authorized to perform bulk updates.', 'error');
       return;
     }
     if (selectedUserIds.length === 0) return;
 
-    if (window.confirm(`Are you sure you want to update the role of the ${selectedUserIds.length} selected users to ${newRole === 'admin' ? 'Admin Overseer' : 'Staff Operator'}?`)) {
-      try {
-        let updatedCount = 0;
-        for (const userId of selectedUserIds) {
-          const u = users.find(user => user.userId === userId);
-          if (u && u.role !== newRole) {
-            const updated = { ...u, role: newRole };
-            await onSaveUser(updated);
-            updatedCount++;
+    showConfirm(
+      "Bulk Update User Roles",
+      `Are you sure you want to update the role of the ${selectedUserIds.length} selected users to ${newRole === 'admin' ? 'Admin Overseer' : 'Staff Operator'}?`,
+      async () => {
+        try {
+          let updatedCount = 0;
+          for (const userId of selectedUserIds) {
+            const u = users.find(user => user.userId === userId);
+            if (u && u.role !== newRole) {
+              const updated = { ...u, role: newRole };
+              await onSaveUser(updated);
+              updatedCount++;
+            }
           }
+          onLogAction('BULK_ROLE_UPDATE', `Bulk updated roles for ${updatedCount} users to ${newRole}`);
+          setSelectedUserIds([]);
+          showToast(`Successfully updated roles for ${updatedCount} users.`, 'success');
+        } catch (err: any) {
+          console.error("Bulk role update failed", err);
+          showToast(`Failed to complete bulk role update: ${err instanceof Error ? err.message : String(err)}`, 'error');
         }
-        onLogAction('BULK_ROLE_UPDATE', `Bulk updated roles for ${updatedCount} users to ${newRole}`);
-        setSelectedUserIds([]);
-        alert(`Successfully updated roles for ${updatedCount} users.`);
-      } catch (err: any) {
-        console.error("Bulk role update failed", err);
-        alert(`Failed to complete bulk role update: ${err instanceof Error ? err.message : String(err)}`);
       }
-    }
+    );
   };
 
   const handleBulkStatusUpdate = async (active: boolean) => {
     if (!isManager) {
-      alert('Only administrators are authorized to perform bulk updates.');
+      showToast('Only administrators are authorized to perform bulk updates.', 'error');
       return;
     }
     if (selectedUserIds.length === 0) return;
@@ -319,10 +357,10 @@ export default function AdminConsole({
       }
       onLogAction('BULK_STATUS_UPDATE', `Bulk set active status to ${active} for ${updatedCount} users`);
       setSelectedUserIds([]);
-      alert(`Successfully set status to ${active ? 'Active on Floor' : 'Off-duty'} for ${updatedCount} users.`);
+      showToast(`Successfully set status to ${active ? 'Active on Floor' : 'Off-duty'} for ${updatedCount} users.`, 'success');
     } catch (err: any) {
       console.error("Bulk status update failed", err);
-      alert(`Failed to complete bulk status update: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Failed to complete bulk status update: ${err instanceof Error ? err.message : String(err)}`, 'error');
     }
   };
 
@@ -361,7 +399,7 @@ export default function AdminConsole({
 
   const toggleUserActive = (user: UserProfile) => {
     if (!isManager) {
-      alert('Only plant managers are authorized to modify operator profiles.');
+      showToast('Only plant managers are authorized to modify operator profiles.', 'error');
       return;
     }
     const updated = { ...user, active: !user.active };
@@ -646,23 +684,24 @@ export default function AdminConsole({
           {activeSubTab === 'jobs' && isManager && (
             <button
               type="button"
-              onClick={async () => {
-                if (window.confirm("CRITICAL WARNING: Are you sure you want to PERMANENTLY ERASE all active and completed job cards? This will wipe the factory operations ledger clean! This step is completely irreversible.")) {
-                  if (window.confirm("FINAL WARNING: Verify your plant credentials. Type 'purge all' in the next modal to proceed with this destructive action.")) {
-                    const typed = window.prompt("Type 'DELETE ALL' to confirm:");
-                    if (typed === 'DELETE ALL') {
-                      try {
-                        await DBService.deleteAllJobCards(currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
-                        alert("Database wiped successfully. Wrote purge event to Enterprise Audit Logs.");
-                        if (onRefreshJobs) onRefreshJobs();
-                      } catch (err) {
-                        console.error("Purge command failed", err);
-                      }
-                    } else {
-                      alert("Wipe aborted: Invalid confirmation phrase.");
+              onClick={() => {
+                showConfirm(
+                  "CRITICAL WARNING: Purge All Job Cards",
+                  "Are you sure you want to PERMANENTLY ERASE all active and completed job cards? This will wipe the factory operations ledger completely clean! This step is completely irreversible.\n\nTo confirm, type DELETE ALL below:",
+                  async () => {
+                    try {
+                      await DBService.deleteAllJobCards(currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                      showToast("Database wiped successfully. Wrote purge event to Enterprise Audit Logs.", "success");
+                      if (onRefreshJobs) onRefreshJobs();
+                    } catch (err: any) {
+                      console.error("Purge command failed", err);
+                      showToast(`Purge failed: ${err.message || String(err)}`, "error");
                     }
-                  }
-                }
+                  },
+                  "Confirm Purge",
+                  "Cancel",
+                  "DELETE ALL"
+                );
               }}
               className="w-full md:w-auto flex items-center justify-center gap-1.5 bg-red-650 hover:bg-red-550 text-white font-sans font-bold text-xs py-2.5 px-4 rounded-lg shadow-sm transition-all border border-red-750 cursor-pointer"
             >
@@ -1084,18 +1123,22 @@ export default function AdminConsole({
                       {isManager ? (
                         <button
                           type="button"
-                          onClick={async () => {
-                            if (window.confirm("Are you sure you want to permanently delete this audit log? This action is irreversible!")) {
-                              try {
-                                await DBService.deleteAuditLog(l.id);
-                                alert("Audit log successfully deleted.");
-                                setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
-                                if (onRefreshJobs) onRefreshJobs();
-                              } catch (err: any) {
-                                console.error("Deletion failed", err);
-                                alert(`Failed to delete audit log: ${err instanceof Error ? err.message : String(err)}`);
+                          onClick={() => {
+                            showConfirm(
+                              "Delete Audit Log",
+                              "Are you sure you want to permanently delete this audit log? This action is irreversible!",
+                              async () => {
+                                try {
+                                  await DBService.deleteAuditLog(l.id);
+                                  showToast("Audit log successfully deleted.", "success");
+                                  setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
+                                  if (onRefreshJobs) onRefreshJobs();
+                                } catch (err: any) {
+                                  console.error("Deletion failed", err);
+                                  showToast(`Failed to delete audit log: ${err instanceof Error ? err.message : String(err)}`, "error");
+                                }
                               }
-                            }
+                            );
                           }}
                           className="text-[11px] bg-red-55 hover:bg-red-150 text-red-600 dark:bg-red-950/20 dark:text-red-400 p-1.5 rounded font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
                           title="Delete Audit Log"
@@ -1144,18 +1187,22 @@ export default function AdminConsole({
                     {isManager && (
                       <button
                         type="button"
-                        onClick={async () => {
-                          if (window.confirm("Are you sure you want to permanently delete this audit log? This action is irreversible!")) {
-                            try {
-                              await DBService.deleteAuditLog(l.id);
-                              alert("Audit log successfully deleted.");
-                              setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
-                              if (onRefreshJobs) onRefreshJobs();
-                            } catch (err: any) {
-                              console.error("Deletion failed", err);
-                              alert(`Failed to delete audit log: ${err instanceof Error ? err.message : String(err)}`);
+                        onClick={() => {
+                          showConfirm(
+                            "Delete Audit Log",
+                            "Are you sure you want to permanently delete this audit log? This action is irreversible!",
+                            async () => {
+                              try {
+                                await DBService.deleteAuditLog(l.id);
+                                showToast("Audit log successfully deleted.", "success");
+                                setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
+                                if (onRefreshJobs) onRefreshJobs();
+                              } catch (err: any) {
+                                console.error("Deletion failed", err);
+                                showToast(`Failed to delete audit log: ${err instanceof Error ? err.message : String(err)}`, "error");
+                              }
                             }
-                          }
+                          );
                         }}
                         className="text-[10px] text-red-600 dark:text-red-400 p-1 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
                       >
@@ -1368,17 +1415,21 @@ export default function AdminConsole({
                               {isManager ? (
                                 <button
                                   type="button"
-                                  onClick={async () => {
-                                    if (window.confirm(`Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is irreversible!`)) {
-                                      try {
-                                        await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
-                                        alert(`Job Card ${j.jobCardNo} successfully removed.`);
-                                        if (onRefreshJobs) onRefreshJobs();
-                                      } catch (err: any) {
-                                        console.error("Deletion failed", err);
-                                        alert(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`);
+                                  onClick={() => {
+                                    showConfirm(
+                                      "Delete Job Card",
+                                      `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is irreversible, and all related material transitions and notifications will be deleted!`,
+                                      async () => {
+                                        try {
+                                          await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                          showToast(`Job Card ${j.jobCardNo} successfully removed.`, "success");
+                                          if (onRefreshJobs) onRefreshJobs();
+                                        } catch (err: any) {
+                                          console.error("Deletion failed", err);
+                                          showToast(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
+                                        }
                                       }
-                                    }
+                                    );
                                   }}
                                   className="text-[11px] bg-red-50 hover:bg-red-100 text-red-600 dark:bg-red-950/20 dark:text-red-400 p-1.5 rounded font-bold transition-all inline-flex items-center gap-1 cursor-pointer"
                                   title="Delete Selected Job Card"
@@ -1447,17 +1498,21 @@ export default function AdminConsole({
                           {isManager && (
                             <button
                               type="button"
-                              onClick={async () => {
-                                if (window.confirm(`Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is irreversible!`)) {
-                                  try {
-                                    await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
-                                    alert(`Job Card ${j.jobCardNo} successfully removed.`);
-                                    if (onRefreshJobs) onRefreshJobs();
-                                  } catch (err: any) {
-                                    console.error("Deletion failed", err);
-                                    alert(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`);
+                              onClick={() => {
+                                showConfirm(
+                                  "Delete Job Card",
+                                  `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is irreversible, and all related material transitions and notifications will be deleted!`,
+                                  async () => {
+                                    try {
+                                      await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                      showToast(`Job Card ${j.jobCardNo} successfully removed.`, "success");
+                                      if (onRefreshJobs) onRefreshJobs();
+                                    } catch (err: any) {
+                                      console.error("Deletion failed", err);
+                                      showToast(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
+                                    }
                                   }
-                                }
+                                );
                               }}
                               className="text-[10px] text-red-600 dark:text-red-400 p-1.5 rounded-lg bg-red-50 hover:bg-red-100 dark:bg-red-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
                             >
@@ -1778,6 +1833,7 @@ export default function AdminConsole({
               {isManager ? (
                 <CompanyForm 
                   companyConfig={companyConfig} 
+                  showToast={showToast}
                   onSave={async (updated) => {
                     try {
                       const updatedWithMeta = {
@@ -1786,11 +1842,11 @@ export default function AdminConsole({
                         updatedAt: new Date().toISOString()
                       };
                       await DBService.saveCompanyConfig(updatedWithMeta, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
-                      alert("Corporate Works Profile successfully synchronized to the secure cloud ledger!");
+                      showToast("Corporate Works Profile successfully synchronized to the secure cloud ledger!", "success");
                       if (onRefreshCompany) onRefreshCompany();
                     } catch (err) {
                       console.error("Failed to save corporate parameters", err);
-                      alert("Critical error: Unable to authenticate secure write block.");
+                      showToast("Critical error: Unable to authenticate secure write block.", "error");
                     }
                   }} 
                 />
@@ -1808,6 +1864,89 @@ export default function AdminConsole({
         </div>
       )}
 
+      {/* Custom Confirmation Dialog Overlay with verification support */}
+      {confirmDialog && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in text-slate-800 dark:text-slate-100">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
+            <h3 className="text-base font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              ⚠️ {confirmDialog.title}
+            </h3>
+            <p className="text-xs text-slate-650 dark:text-slate-300 mt-3 whitespace-pre-wrap leading-relaxed">
+              {confirmDialog.message}
+            </p>
+            
+            {confirmDialog.requireText && (
+              <div className="mt-4 space-y-2">
+                <span className="block text-[10px] uppercase font-bold tracking-wider text-slate-400">Verification Phrase Needed</span>
+                <input
+                  type="text"
+                  placeholder={`Type "${confirmDialog.requireText}"`}
+                  className="w-full bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-xs font-bold font-mono uppercase focus:outline-none focus:ring-1 focus:ring-red-550"
+                  id="confirm_verification_input"
+                  onChange={(e) => {
+                    const el = document.getElementById("btn_confirm_modal_submit") as HTMLButtonElement | null;
+                    if (el) {
+                      el.disabled = e.target.value !== confirmDialog.requireText;
+                    }
+                  }}
+                />
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 mt-6 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setConfirmDialog(null)}
+                className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer"
+              >
+                {confirmDialog.cancelText || 'Cancel'}
+              </button>
+              <button
+                type="button"
+                id="btn_confirm_modal_submit"
+                disabled={!!confirmDialog.requireText}
+                onClick={async () => {
+                  const onConf = confirmDialog.onConfirm;
+                  setConfirmDialog(null);
+                  await onConf();
+                }}
+                className="px-5 py-2.5 bg-red-650 hover:bg-red-750 disabled:opacity-30 disabled:hover:bg-red-650 text-white rounded-xl transition shadow-sm cursor-pointer"
+              >
+                {confirmDialog.confirmText || 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Non-blocking Toast Alerts */}
+      {toast && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[999] max-w-sm w-full px-4 animate-bounce-in">
+          <div className={`
+            flex items-center gap-3 p-4 rounded-xl shadow-lg border text-sm font-medium
+            ${toast.type === 'success' 
+              ? 'bg-emerald-50 dark:bg-emerald-950/85 border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-200' 
+              : toast.type === 'error'
+              ? 'bg-rose-50 dark:bg-rose-950/85 border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200'
+              : 'bg-blue-50 dark:bg-blue-950/85 border-blue-200 dark:border-blue-900 text-blue-800 dark:text-blue-200'}
+          `}>
+            <div className="shrink-0">
+              {toast.type === 'success' ? '✅' : toast.type === 'error' ? '❌' : 'ℹ️'}
+            </div>
+            <div className="grow text-xs leading-normal">
+              {toast.message}
+            </div>
+            <button 
+              type="button"
+              onClick={() => setToast(null)}
+              className="text-slate-450 hover:text-slate-650 dark:hover:text-slate-200 shrink-0 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -1815,9 +1954,10 @@ export default function AdminConsole({
 interface CompanyFormProps {
   companyConfig: CompanyConfig | null;
   onSave: (config: Omit<CompanyConfig, 'updatedBy' | 'updatedAt'>) => Promise<void>;
+  showToast?: (message: string, type: 'success' | 'error' | 'info') => void;
 }
 
-function CompanyForm({ companyConfig, onSave }: CompanyFormProps) {
+function CompanyForm({ companyConfig, onSave, showToast }: CompanyFormProps) {
   const [companyName, setCompanyName] = useState(companyConfig?.companyName || 'Precision Metal Works');
   const [details, setDetails] = useState(companyConfig?.details || 'Specialists in high-tensile fasteners, engine components, and industrial finishes.');
   const [phone, setPhone] = useState(companyConfig?.phone || '+91 98765 43210');
@@ -1838,7 +1978,11 @@ function CompanyForm({ companyConfig, onSave }: CompanyFormProps) {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!companyName.trim()) {
-      alert("Company Name is required.");
+      if (showToast) {
+        showToast("Company Name is required.", "error");
+      } else {
+        alert("Company Name is required.");
+      }
       return;
     }
     setSaving(true);

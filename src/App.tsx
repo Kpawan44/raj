@@ -180,6 +180,27 @@ export default function App() {
   const [scannerOpen, setScannerOpen] = useState(false);
   const [showNotificationsDropdown, setShowNotificationsDropdown] = useState(false);
 
+  // --- NON-BLOCKING TOASTS & CONFIRMATIONS ---
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<{
+    title: string;
+    message: string;
+    onConfirm: () => void | Promise<void>;
+    confirmText?: string;
+    cancelText?: string;
+  } | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(prev => prev?.message === message ? null : prev);
+    }, 4500);
+  };
+
+  const showConfirm = (title: string, message: string, onConfirm: () => void | Promise<void>, confirmText = 'Confirm', cancelText = 'Cancel') => {
+    setConfirmDialog({ title, message, onConfirm, confirmText, cancelText });
+  };
+
   // --- FILTERS TABLE ---
   const [allOrdersSearch, setAllOrdersSearch] = useState('');
   const [allOrdersDeptFilter, setAllOrdersDeptFilter] = useState<string>('All');
@@ -189,12 +210,14 @@ export default function App() {
   // --- LOAD INITIAL DATASE ---
   const refreshAllStates = async () => {
     try {
-      const u = await DBService.getUsers();
-      const jc = await DBService.getJobCards();
-      const mov = await DBService.getMovements();
-      const n = await DBService.getNotifications();
-      const logs = await DBService.getAuditLogs();
-      const config = await DBService.getCompanyConfig();
+      const [u, jc, mov, n, logs, config] = await Promise.all([
+        DBService.getUsers(),
+        DBService.getJobCards(),
+        DBService.getMovements(),
+        DBService.getNotifications(),
+        DBService.getAuditLogs(),
+        DBService.getCompanyConfig()
+      ]);
 
       setUsers(u);
       setJobCards(jc);
@@ -236,15 +259,27 @@ export default function App() {
   useEffect(() => {
     refreshAllStates();
 
+    // Debounce the refresh triggers to avoid flooding database connections on initial mount / batch updates
+    let refreshTimeout: NodeJS.Timeout | null = null;
+    const debouncedRefresh = () => {
+      if (refreshTimeout) {
+        clearTimeout(refreshTimeout);
+      }
+      refreshTimeout = setTimeout(() => {
+        refreshAllStates();
+      }, 100);
+    };
+
     // Attach real-time subscription streams emulation triggers
-    const unsubUsers = DBService.subscribeToUpdates('mfr_users', refreshAllStates);
-    const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', refreshAllStates);
-    const unsubMoves = DBService.subscribeToUpdates('mfr_movements', refreshAllStates);
-    const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', refreshAllStates);
-    const unsubAudits = DBService.subscribeToUpdates('mfr_audit_logs', refreshAllStates);
-    const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', refreshAllStates);
+    const unsubUsers = DBService.subscribeToUpdates('mfr_users', debouncedRefresh);
+    const unsubJobs = DBService.subscribeToUpdates('mfr_job_cards', debouncedRefresh);
+    const unsubMoves = DBService.subscribeToUpdates('mfr_movements', debouncedRefresh);
+    const unsubNotifs = DBService.subscribeToUpdates('mfr_notifications', debouncedRefresh);
+    const unsubAudits = DBService.subscribeToUpdates('mfr_audit_logs', debouncedRefresh);
+    const unsubCompany = DBService.subscribeToUpdates('mfr_company_config', debouncedRefresh);
 
     return () => {
+      if (refreshTimeout) clearTimeout(refreshTimeout);
       unsubUsers();
       unsubJobs();
       unsubMoves();
@@ -397,33 +432,36 @@ export default function App() {
     const pendingQty = parentJob.orderQty - totalMovedQty;
     
     if (pendingQty <= 0) {
-      alert("No pending quantity to split.");
+      showToast("No pending quantity to split.", "error");
       return;
     }
 
-    if (!confirm(`Create new sub-job for ${pendingQty} KG from ${parentJob.jobCardNo}?`)) return;
+    showConfirm(
+      "Create Sub-Job",
+      `Are you sure you want to split this job and create a new sub-job for ${pendingQty} KG from ${parentJob.jobCardNo}?`,
+      async () => {
+        // Create the new sub job based on parent job details
+        const subJob = {
+          partyName: parentJob.partyName,
+          itemName: parentJob.itemName,
+          itemCode: parentJob.itemCode,
+          orderQty: pendingQty,
+          currentQty: pendingQty,
+          currentDepartment: 'Production' as Department,
+          status: 'Pending' as JobCardStatus,
+          heatTreatmentRequired: parentJob.heatTreatmentRequired,
+          createdBy: currentUser.name,
+        };
 
-    // Create the new sub job based on parent job details
-    const subJob = {
-      partyName: parentJob.partyName,
-      itemName: parentJob.itemName,
-      itemCode: parentJob.itemCode,
-      orderQty: pendingQty,
-      currentQty: pendingQty,
-      currentDepartment: 'Production' as Department,
-      status: 'Pending' as JobCardStatus,
-      heatTreatmentRequired: parentJob.heatTreatmentRequired,
-      createdBy: currentUser.name,
-      // ...other fields if needed
-    };
-
-    try {
-      await DBService.createJobCard(subJob, currentUser.userId, currentUser.name);
-      alert(`Sub-Job successfully created for ${pendingQty} KG!`);
-      refreshAllStates();
-    } catch (err: any) {
-      alert(`Failed to create Sub-Job: ${err.message}`);
-    }
+        try {
+          await DBService.createJobCard(subJob, currentUser.userId, currentUser.name);
+          showToast(`Sub-Job successfully created for ${pendingQty} KG!`, "success");
+          refreshAllStates();
+        } catch (err: any) {
+          showToast(`Failed to create Sub-Job: ${err.message}`, "error");
+        }
+      }
+    );
   };
 
   const handleCreateJobCard = async (job: any) => {
@@ -432,11 +470,11 @@ export default function App() {
     try {
       const newCard = await DBService.createJobCard(job, currentUser.userId, currentUser.name);
       console.log("Job card created:", newCard);
-      alert(`Job Card successfully created!`);
+      showToast(`Job Card successfully created!`, "success");
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to create job card", err);
-      alert(`Failed to create Job Card: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Failed to create Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   };
 
@@ -447,7 +485,7 @@ export default function App() {
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to update job card", err);
-      alert(`Failed to update Job Card: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Failed to update Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   };
 
@@ -458,7 +496,7 @@ export default function App() {
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to transfer material", err);
-      alert(`Failed to transfer material: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Failed to transfer material: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   };
 
@@ -469,7 +507,7 @@ export default function App() {
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to accept movement", err);
-      alert(`Failed to accept material transfer: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Failed to accept material transfer: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   };
 
@@ -480,7 +518,7 @@ export default function App() {
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to reject movement", err);
-      alert(`Failed to reject material transfer: ${err instanceof Error ? err.message : String(err)}`);
+      showToast(`Failed to reject material transfer: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   };
 
@@ -693,11 +731,13 @@ export default function App() {
 
   const handleMarkNotifRead = async (id: string) => {
     await DBService.markNotificationRead(id);
+    await refreshAllStates();
   };
 
   const handleMarkAllNotifsRead = async () => {
-    if (!activeDepartment) return;
-    await DBService.clearAllNotifications(activeDepartment);
+    const dept = activeDepartment || 'All';
+    await DBService.clearAllNotifications(dept);
+    await refreshAllStates();
     setShowNotificationsDropdown(false);
   };
 
@@ -1269,17 +1309,21 @@ export default function App() {
                                   </button>
                                   {(currentUser?.role === 'admin' || currentUser?.department === 'Admin') && (
                                     <button
-                                      onClick={async () => {
-                                        if (window.confirm(`Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible!`)) {
-                                          try {
-                                            await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
-                                            alert(`Job Card ${j.jobCardNo} has been deleted successfully.`);
-                                            refreshAllStates();
-                                          } catch (err: any) {
-                                            console.error("Failed to delete job card", err);
-                                            alert(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`);
+                                      onClick={() => {
+                                        showConfirm(
+                                          "Delete Job Card",
+                                          `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible, and all related material transitions and notifications will be deleted!`,
+                                          async () => {
+                                            try {
+                                              await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                              showToast(`Job Card ${j.jobCardNo} has been deleted successfully.`, "success");
+                                              refreshAllStates();
+                                            } catch (err: any) {
+                                              console.error("Failed to delete job card", err);
+                                              showToast(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
+                                            }
                                           }
-                                        }
+                                        );
                                       }}
                                       className="p-1 px-1.5 rounded text-red-500 hover:bg-red-500/10 transition"
                                       title="Admin: Delete Selected Job Card"
@@ -1416,17 +1460,21 @@ export default function App() {
                               </button>
                               {(currentUser?.role === 'admin' || currentUser?.department === 'Admin') && (
                                 <button
-                                  onClick={async () => {
-                                    if (window.confirm(`Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible!`)) {
-                                      try {
-                                        await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
-                                        alert(`Job Card ${j.jobCardNo} has been deleted successfully.`);
-                                        refreshAllStates();
-                                      } catch (err: any) {
-                                        console.error("Failed to delete job card", err);
-                                        alert(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`);
+                                  onClick={() => {
+                                    showConfirm(
+                                      "Delete Job Card",
+                                      `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible, and all related material transitions and notifications will be deleted!`,
+                                      async () => {
+                                        try {
+                                          await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                          showToast(`Job Card ${j.jobCardNo} has been deleted successfully.`, "success");
+                                          refreshAllStates();
+                                        } catch (err: any) {
+                                          console.error("Failed to delete job card", err);
+                                          showToast(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
+                                        }
                                       }
-                                    }
+                                    );
                                   }}
                                   className="p-1 px-1.5 rounded text-red-500 hover:bg-red-500/10 transition"
                                   title="Admin: Delete Selected Job Card"
@@ -1745,6 +1793,65 @@ export default function App() {
           spreadsheetName={sheetsDetails.name || undefined}
           spreadsheetUrl={sheetsDetails.url || undefined}
         />
+      )}
+
+      {/* Custom Confirmation Dialog Overlay */}
+      {confirmDialog && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
+            <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+              ⚠️ {confirmDialog.title}
+            </h3>
+            <p className="text-sm text-slate-605 dark:text-slate-300 mt-3 whitespace-pre-wrap leading-relaxed">
+              {confirmDialog.message}
+            </p>
+            <div className="flex justify-end gap-3 mt-6">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="px-4 py-2 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-xl text-xs font-semibold transition cursor-pointer"
+              >
+                {confirmDialog.cancelText || 'Cancel'}
+              </button>
+              <button
+                onClick={async () => {
+                  const onConf = confirmDialog.onConfirm;
+                  setConfirmDialog(null);
+                  await onConf();
+                }}
+                className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-semibold transition shadow-md hover:shadow-lg cursor-pointer"
+              >
+                {confirmDialog.confirmText || 'Confirm'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Non-blocking Toast Alerts */}
+      {toast && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[999] max-w-sm w-full px-4 animate-bounce-in">
+          <div className={`
+            flex items-center gap-3 p-4 rounded-xl shadow-lg border text-sm font-medium
+            ${toast.type === 'success' 
+              ? 'bg-emerald-50 dark:bg-emerald-950/85 border-emerald-200 dark:border-emerald-900 text-emerald-800 dark:text-emerald-200' 
+              : toast.type === 'error'
+              ? 'bg-rose-50 dark:bg-rose-950/85 border-rose-200 dark:border-rose-900 text-rose-800 dark:text-rose-200'
+              : 'bg-blue-50 dark:bg-blue-950/85 border-blue-200 dark:border-blue-900 text-blue-800 dark:text-blue-200'}
+          `}>
+            <div className="shrink-0">
+              {toast.type === 'success' ? '✅' : toast.type === 'error' ? '❌' : 'ℹ️'}
+            </div>
+            <div className="grow text-xs leading-normal">
+              {toast.message}
+            </div>
+            <button 
+              onClick={() => setToast(null)}
+              className="text-slate-450 hover:text-slate-600 dark:hover:text-slate-200 shrink-0 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
       )}
 
     </div>

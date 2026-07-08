@@ -109,8 +109,13 @@ if (!isPlaceholder) {
       }, dbId);
       console.log(`Real Firebase and Firestore persistent local cache initialized successfully for database: ${dbId}!`);
     } catch (cacheError) {
-      console.warn(`Failed to initialize Firestore persistent cache, using fallback getFirestore for database ${dbId}:`, cacheError);
-      dbInstance = getFirestore(app, dbId);
+      console.warn(`Failed to initialize Firestore persistent cache, using fallback initializeFirestore for database ${dbId}:`, cacheError);
+      try {
+        dbInstance = initializeFirestore(app, {}, dbId);
+      } catch (fallbackError) {
+        console.error("Firestore initialization fallback failed completely:", fallbackError);
+        dbInstance = getFirestore(app, dbId);
+      }
     }
     authInstance = getAuth(app);
     useRealFirebase = true;
@@ -1175,7 +1180,9 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     const list = await this.getNotifications();
     const updated = list.map(n => {
-      if (department === 'Admin' || department === 'All' || n.department === department || n.department === 'All') {
+      if (!n) return n;
+      const notifDept = n.department || 'All';
+      if (department === 'Admin' || department === 'All' || notifDept === department || notifDept === 'All') {
         return { ...n, read: true };
       }
       return n;
@@ -1186,7 +1193,9 @@ export class DBService {
     if (useRealFirebase && db) {
       try {
         for (const n of list) {
-          if ((department === 'Admin' || department === 'All' || n.department === department || n.department === 'All') && !n.read) {
+          if (!n) continue;
+          const notifDept = n.department || 'All';
+          if ((department === 'Admin' || department === 'All' || notifDept === department || notifDept === 'All') && !n.read) {
             await updateDoc(doc(db, 'mfr_notifications', n.notificationId), { read: true });
           }
         }
@@ -1200,10 +1209,12 @@ export class DBService {
     // 1. Update Local Storage offline cache first
     const list = await this.getNotifications();
     const remaining = list.filter(n => {
+      if (!n) return false;
       if (department === 'Admin' || department === 'All') {
         return false;
       }
-      return n.department !== department && n.department !== 'All';
+      const notifDept = n.department || 'All';
+      return notifDept !== department && notifDept !== 'All';
     });
     setLocalStorageItem('mfr_notifications', remaining);
 
@@ -1211,7 +1222,9 @@ export class DBService {
     if (useRealFirebase && db) {
       try {
         for (const n of list) {
-          if (department === 'Admin' || department === 'All' || n.department === department || n.department === 'All') {
+          if (!n) continue;
+          const notifDept = n.department || 'All';
+          if (department === 'Admin' || department === 'All' || notifDept === department || notifDept === 'All') {
             await deleteDoc(doc(db, 'mfr_notifications', n.notificationId));
           }
         }
