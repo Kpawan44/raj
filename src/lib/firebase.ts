@@ -2,6 +2,9 @@ import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getFirestore, 
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   doc, 
   getDocFromServer, 
   collection, 
@@ -28,9 +31,10 @@ import {
 // Let's check if the configuration consists of placeholders
 const isPlaceholder = 
   !firebaseConfig || 
+  !firebaseConfig.apiKey ||
   firebaseConfig.apiKey === 'placeholder-api-key' || 
-  firebaseConfig.apiKey === 'AIzaSyBYIcP0N_iqhPwj3T20szRq49pLgFkUyc8' ||
-  !firebaseConfig.apiKey;
+  firebaseConfig.apiKey.includes('placeholder') ||
+  firebaseConfig.apiKey.includes('remixed');
 
 export enum OperationType {
   CREATE = 'create',
@@ -59,8 +63,18 @@ export let isFirestoreOffline = false;
 // Global handleFirestoreError to wrap Firestore operations
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
   isFirestoreOffline = true;
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  
+  // Check if this error is an expected offline/unreachable state
+  const isOfflineError = 
+    errorMessage.includes('offline') || 
+    errorMessage.includes('Failed to get document because the client is offline') || 
+    errorMessage.includes('unavailable') ||
+    errorMessage.includes('could not be reached') ||
+    errorMessage.includes('network');
+
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
+    error: errorMessage,
     authInfo: {
       userId: isPlaceholder ? 'mock-user' : getAuth().currentUser?.uid,
       email: isPlaceholder ? 'pawan.kummar16@gmail.com' : getAuth().currentUser?.email,
@@ -70,7 +84,12 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     operationType,
     path
   };
-  console.warn('Firestore Operation Offline/Deferred: ', JSON.stringify(errInfo));
+
+  if (isOfflineError) {
+    console.info(`[Offline Mode] Firestore operation [${operationType}] for [${path}] deferred. Serving from high-fidelity local storage/cache fallback.`);
+  } else {
+    console.warn('Firestore Operation Offline/Deferred: ', JSON.stringify(errInfo));
+  }
 }
 
 // Setup real Firebase
@@ -81,7 +100,18 @@ let useRealFirebase = false;
 if (!isPlaceholder) {
   try {
     const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
-    dbInstance = getFirestore(app);
+    const dbId = (firebaseConfig as any).firestoreDatabaseId || '(default)';
+    try {
+      dbInstance = initializeFirestore(app, {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager()
+        })
+      }, dbId);
+      console.log(`Real Firebase and Firestore persistent local cache initialized successfully for database: ${dbId}!`);
+    } catch (cacheError) {
+      console.warn(`Failed to initialize Firestore persistent cache, using fallback getFirestore for database ${dbId}:`, cacheError);
+      dbInstance = getFirestore(app, dbId);
+    }
     authInstance = getAuth(app);
     useRealFirebase = true;
     console.log("Real Firebase initialized successfully!");
@@ -233,6 +263,19 @@ const defaultJobCards: JobCard[] = [
 ];
 
 const defaultMovements: MaterialMovement[] = [
+  {
+    movementId: 'M-2000',
+    jobCardNo: 'JC-1001',
+    fromDepartment: 'Dispatch',
+    toDepartment: 'Production',
+    quantity: 1200,
+    transferBy: 'Alice Dispatcher',
+    transferDate: new Date(Date.now() - 3600000 * 24 * 3.1).toISOString(),
+    accepted: true,
+    acceptedBy: 'Bob Production',
+    acceptedDate: new Date(Date.now() - 3600000 * 24 * 3.0).toISOString(),
+    remarks: 'Initial raw material dispatch'
+  },
   {
     movementId: 'M-2001',
     jobCardNo: 'JC-1002',
@@ -411,7 +454,19 @@ export class DBService {
         await setDoc(seededRef, { companyName: 'SystemSeeded', details: 'Initialized' } as CompanyConfig);
         console.log("Seeding process completed cleanly.");
       } catch (err) {
-        console.warn("Seeding process bypassed or deferred due to network/permissions:", err);
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const isOffline = 
+          errMsg.includes('offline') || 
+          errMsg.includes('Failed to get document because the client is offline') || 
+          errMsg.includes('unavailable') ||
+          errMsg.includes('could not be reached') ||
+          errMsg.includes('network');
+          
+        if (isOffline) {
+          console.info("[Offline Mode] Firestore seeding deferred. High-fidelity pre-seeded data is active in local storage fallback.");
+        } else {
+          console.warn("Seeding process bypassed or deferred due to network/permissions:", err);
+        }
       }
     })();
 
@@ -498,6 +553,11 @@ export class DBService {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_users'));
+        if (querySnapshot.empty) {
+          console.warn("Firestore returned empty users collection. Pre-populating local storage cache with defaultUsers.");
+          setLocalStorageItem('mfr_users', defaultUsers);
+          return defaultUsers;
+        }
         const usersList: UserProfile[] = [];
         querySnapshot.forEach((docSnap) => {
           usersList.push(docSnap.data() as UserProfile);
@@ -568,6 +628,11 @@ export class DBService {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_job_cards'));
+        if (querySnapshot.empty) {
+          console.warn("Firestore returned empty job cards collection. Pre-populating local storage cache with defaultJobCards.");
+          setLocalStorageItem('mfr_job_cards', defaultJobCards);
+          return defaultJobCards;
+        }
         const cards: JobCard[] = [];
         querySnapshot.forEach((docSnap) => {
           cards.push(docSnap.data() as JobCard);
@@ -820,6 +885,15 @@ export class DBService {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_movements'));
+        if (querySnapshot.empty) {
+          console.warn("Firestore returned empty movements collection. Pre-populating local storage and Firestore with defaultMovements.");
+          setLocalStorageItem('mfr_movements', defaultMovements);
+          // Auto-heal/seed the physical collection as well
+          for (const m of defaultMovements) {
+            await setDoc(doc(db, 'mfr_movements', m.movementId), m);
+          }
+          return defaultMovements;
+        }
         const list: MaterialMovement[] = [];
         querySnapshot.forEach((docSnap) => {
           list.push(docSnap.data() as MaterialMovement);
@@ -1032,6 +1106,11 @@ export class DBService {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_notifications'));
+        if (querySnapshot.empty) {
+          console.warn("Firestore returned empty notifications collection. Pre-populating local storage cache with defaultNotifications.");
+          setLocalStorageItem('mfr_notifications', defaultNotifications);
+          return defaultNotifications;
+        }
         const list: AppNotification[] = [];
         querySnapshot.forEach((docSnap) => {
           list.push(docSnap.data() as AppNotification);
@@ -1189,6 +1268,20 @@ export class DBService {
     logActionToSheets(newLog).catch(err => console.warn('Google Sheets action log failed:', err));
   }
 
+  static async deleteAuditLog(logId: string): Promise<void> {
+    if (useRealFirebase && db) {
+      try {
+        await deleteDoc(doc(db, 'mfr_audit_logs', logId));
+        return;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `mfr_audit_logs/${logId}`);
+      }
+    }
+    const logs = await this.getAuditLogs();
+    const filtered = logs.filter(l => l.id !== logId);
+    setLocalStorageItem('mfr_audit_logs', filtered);
+  }
+
   // --- COMPANY CONFIG ---
   static async getCompanyConfig(): Promise<CompanyConfig> {
     if (useRealFirebase && db) {
@@ -1228,6 +1321,11 @@ export class DBService {
           callback();
         }, (err) => {
           console.error(`Firestore watch failed for collection [${collectionName}]: `, err);
+          try {
+            handleFirestoreError(err, OperationType.GET, collectionName);
+          } catch (e) {
+            // Logged/handled via handleFirestoreError
+          }
         });
         return unsub;
       } catch (err) {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Factory, 
   Bell, 
@@ -22,7 +22,8 @@ import {
   Menu,
   Trash2,
   Printer,
-  QrCode
+  QrCode,
+  ArrowUpDown
 } from 'lucide-react';
 import { DBService, auth } from './lib/firebase';
 import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus } from './types';
@@ -74,13 +75,97 @@ export default function App() {
 
   // --- VIEWPORT STATES ---
   const [activeTab, setActiveTab] = useState<'dashboard' | 'all-orders' | 'timeline-live' | 'reports' | 'admin-users' | string>('dashboard');
-  const [darkMode, setDarkMode] = useState(false);
+  const [darkMode, setDarkMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('darkMode');
+      if (saved !== null) {
+        return saved === 'true';
+      }
+    }
+    return false;
+  });
   const [sidebarOpen, setSidebarOpen] = useState(() => {
     if (typeof window !== 'undefined') {
       return window.innerWidth >= 1024;
     }
     return false;
   });
+
+  // --- TOUCH SWIPE-TO-CLOSE GESTURE FOR SIDEBAR ---
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const touchStartX = useRef<number>(0);
+  const touchStartY = useRef<number>(0);
+  const touchCurrentX = useRef<number>(0);
+  const isSwiping = useRef<boolean>(false);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (!sidebarOpen || window.innerWidth >= 1024) return;
+    touchStartX.current = e.touches[0].clientX;
+    touchStartY.current = e.touches[0].clientY;
+    touchCurrentX.current = e.touches[0].clientX;
+    isSwiping.current = false;
+    
+    if (sidebarRef.current) {
+      // Disable transitions temporarily during drag for instant rendering response
+      sidebarRef.current.style.transition = 'none';
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!sidebarOpen || window.innerWidth >= 1024) return;
+    
+    const currentX = e.touches[0].clientX;
+    const currentY = e.touches[0].clientY;
+    const deltaX = currentX - touchStartX.current;
+    const deltaY = currentY - touchStartY.current;
+
+    if (!isSwiping.current) {
+      const absDeltaX = Math.abs(deltaX);
+      const absDeltaY = Math.abs(deltaY);
+      
+      // Stop tracking if vertical scroll is dominant to avoid interfering with scrolling down list of links
+      if (absDeltaY > absDeltaX && absDeltaY > 8) {
+        return;
+      }
+      
+      // If horizontal swiping to the left is clear, enable swiping mode
+      if (absDeltaX > absDeltaY && absDeltaX > 10 && deltaX < 0) {
+        isSwiping.current = true;
+      }
+    }
+
+    if (isSwiping.current) {
+      // Prevent browser default behaviors like page pull-to-refresh or back navigation if swipe is active
+      if (e.cancelable) {
+        e.preventDefault();
+      }
+      // Translate the sidebar leftwards based on finger movement, capped at 0 (full screen fit)
+      const translateVal = Math.min(0, deltaX);
+      if (sidebarRef.current) {
+        sidebarRef.current.style.transform = `translateX(${translateVal}px)`;
+      }
+      touchCurrentX.current = currentX;
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (!sidebarOpen || window.innerWidth >= 1024) return;
+    
+    if (sidebarRef.current) {
+      // Reset the inline styles so CSS transitions take back control
+      sidebarRef.current.style.transition = '';
+      sidebarRef.current.style.transform = '';
+    }
+
+    if (isSwiping.current) {
+      const deltaX = touchCurrentX.current - touchStartX.current;
+      // Close the sidebar if dragged leftwards by more than 55 pixels
+      if (deltaX < -55) {
+        setSidebarOpen(false);
+      }
+    }
+    isSwiping.current = false;
+  };
   
   // --- GOOGLE WORKSPACE SYNC ---
   const [sheetsDetails, setSheetsDetails] = useState(getSpreadsheetDetails());
@@ -99,6 +184,7 @@ export default function App() {
   const [allOrdersSearch, setAllOrdersSearch] = useState('');
   const [allOrdersDeptFilter, setAllOrdersDeptFilter] = useState<string>('All');
   const [allOrdersStatusFilter, setAllOrdersStatusFilter] = useState<string>('All');
+  const [mobileSortBy, setMobileSortBy] = useState<'Priority' | 'Newest' | 'Department'>('Priority');
 
   // --- LOAD INITIAL DATASE ---
   const refreshAllStates = async () => {
@@ -173,8 +259,10 @@ export default function App() {
     const root = window.document.documentElement;
     if (darkMode) {
       root.classList.add('dark');
+      localStorage.setItem('darkMode', 'true');
     } else {
       root.classList.remove('dark');
+      localStorage.setItem('darkMode', 'false');
     }
   }, [darkMode]);
 
@@ -398,11 +486,13 @@ export default function App() {
 
   const handleSaveUserProfile = async (profile: UserProfile) => {
     await DBService.saveUser(profile);
+    refreshAllStates();
   };
 
   const handleDeleteUserProfile = async (userId: string, userName: string) => {
     if (!currentUser) return;
     await DBService.deleteUser(userId, userName, currentUser.userId, currentUser.name);
+    refreshAllStates();
   };
 
   const handleLogActionExternally = async (action: string, details: string) => {
@@ -541,6 +631,56 @@ export default function App() {
   };
 
   const filteredAllOrders = getFilteredAllOrdersList();
+
+  const getSortedMobileOrders = () => {
+    const list = [...filteredAllOrders];
+    if (mobileSortBy === 'Newest') {
+      return list.sort((a, b) => {
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+    }
+    
+    if (mobileSortBy === 'Department') {
+      const deptOrder: Record<string, number> = {
+        'Production': 1,
+        'Heat Treatment': 2,
+        'Plating': 3,
+        'Packing': 4,
+        'Store': 5,
+        'Completed': 6,
+        'Dispatch': 7
+      };
+      return list.sort((a, b) => {
+        const orderA = deptOrder[a.currentDepartment] || 99;
+        const orderB = deptOrder[b.currentDepartment] || 99;
+        if (orderA !== orderB) return orderA - orderB;
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+    }
+    
+    if (mobileSortBy === 'Priority') {
+      const statusOrder: Record<string, number> = {
+        'Pending Acceptance': 1,
+        'In Process': 2,
+        'Pending': 3,
+        'Rejected': 4,
+        'Completed': 5
+      };
+      return list.sort((a, b) => {
+        const orderA = statusOrder[a.status] || 99;
+        const orderB = statusOrder[b.status] || 99;
+        if (orderA !== orderB) return orderA - orderB;
+        
+        if (a.heatTreatmentRequired !== b.heatTreatmentRequired) {
+          return a.heatTreatmentRequired ? -1 : 1;
+        }
+
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+    }
+    
+    return list;
+  };
 
   // --- NOTIFICATION CALCULATOR ---
   const activeDepartment = currentUser?.department === 'Admin' ? 'Admin' : currentUser?.department as Department;
@@ -737,11 +877,17 @@ export default function App() {
         />
       )}
       
-      <div className={`
-        fixed inset-y-0 left-0 z-50 transition-all duration-300 ease-in-out flex shrink-0 h-full print:hidden
-        lg:static lg:z-0 lg:translate-x-0
-        ${sidebarOpen ? 'translate-x-0 w-[220px]' : '-translate-x-full w-[220px] lg:w-0 lg:opacity-0 lg:overflow-hidden'}
-      `}>
+      <div 
+        ref={sidebarRef}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
+        className={`
+          fixed inset-y-0 left-0 z-50 transition-all duration-300 ease-in-out flex shrink-0 h-full print:hidden
+          lg:static lg:z-0 lg:translate-x-0
+          ${sidebarOpen ? 'translate-x-0 w-[220px]' : '-translate-x-full w-[220px] lg:w-0 lg:opacity-0 lg:overflow-hidden'}
+        `}
+      >
         <Sidebar 
           currentUser={currentUser}
           availableUsers={users}
@@ -766,8 +912,8 @@ export default function App() {
       <main className="flex-1 flex flex-col min-w-0 overflow-hidden bg-[#F8FAFC] dark:bg-slate-950">
         
         {/* Top Control Bar block */}
-        <header className="h-16 border-b border-[#E2E8F0] dark:border-slate-850 px-6 flex items-center justify-between bg-white dark:bg-slate-900 shrink-0 select-none print:hidden">
-          <div className="flex items-center gap-3">
+        <header className="h-16 border-b border-[#E2E8F0] dark:border-slate-850 px-3 sm:px-6 flex items-center justify-between bg-white dark:bg-slate-900 shrink-0 select-none print:hidden">
+          <div className="flex items-center gap-2 sm:gap-3">
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
               className="p-1.5 -ml-1 text-slate-500 hover:text-slate-705 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-805 rounded-lg transition-all cursor-pointer"
@@ -781,20 +927,20 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-3 relative">
+          <div className="flex items-center gap-2 sm:gap-3 relative">
             
             {/* Google Sheets Live Syncer Status badge & controls */}
             {isSheetsActive ? (
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1">
                 <a 
                   href={sheetsDetails.url || "#"} 
                   target="_blank" 
                   rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/35 dark:hover:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-900/45 text-emerald-700 dark:text-emerald-400 text-xs font-semibold font-sans transition-all"
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/35 dark:hover:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-900/45 text-emerald-700 dark:text-emerald-400 text-xs font-semibold font-sans transition-all"
                   title="Open live Google Sheets logbook in a new tab"
                 >
                   <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                  <span className="hidden leading-none md:inline">Sheets Synced</span>
+                  <span className="hidden leading-none sm:inline">Sheets Synced</span>
                 </a>
                 <button
                   onClick={handleDisconnectGoogleSheets}
@@ -807,25 +953,26 @@ export default function App() {
             ) : (
               <button
                 onClick={() => setShowSheetsModal(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-semibold transition cursor-pointer"
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-semibold transition cursor-pointer"
                 title="Connect real-time Google Sheets for logbook updates"
               >
                 <div className="h-2 w-2 rounded-full bg-slate-350" />
-                <span>Link Google Sheets</span>
+                <span className="hidden sm:inline">Link Google Sheets</span>
+                <span className="sm:hidden">Link Sheets</span>
               </button>
             )}
-
 
 
             {/* QR Code Scanner Button */}
             <button
               onClick={() => setScannerOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-semibold transition cursor-pointer print:hidden"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 text-xs font-semibold transition cursor-pointer print:hidden"
               title="Scan or simulate physical Job Card QR labels"
               id="btn_qr_scanner"
             >
               <QrCode className="h-4 w-4 text-[#4F46E5] dark:text-[#818CF8]" />
-              <span>QR Scanner</span>
+              <span className="hidden sm:inline">QR Scanner</span>
+              <span className="sm:hidden">Scan</span>
             </button>
 
             {/* Notification Bell with counter */}
@@ -899,7 +1046,7 @@ export default function App() {
         </header>
 
         {/* 3. SCROLLABLE OPERATIONS CONTAINER */}
-        <div className="flex-1 p-6 space-y-6 overflow-y-auto bg-[#F8FAFC] dark:bg-slate-950 print:p-0 print:overflow-visible">
+        <div className="flex-1 p-3 sm:p-6 space-y-4 sm:space-y-6 overflow-y-auto bg-[#F8FAFC] dark:bg-slate-950 print:p-0 print:overflow-visible">
           
           {/* Active stats display overview row */}
           {activeTab === 'dashboard' && (
@@ -999,7 +1146,8 @@ export default function App() {
 
               {/* Grid table */}
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-                <div className="overflow-x-auto">
+                {/* Desktop View: Table */}
+                <div className="hidden md:block overflow-x-auto">
                   {filteredAllOrders.length === 0 ? (
                     <div className="text-center p-12 space-y-1.5">
                       <span className="text-2xl">🔍</span>
@@ -1146,6 +1294,151 @@ export default function App() {
                         })}
                       </tbody>
                     </table>
+                  )}
+                </div>
+
+                {/* Mobile View: Cards */}
+                <div className="block md:hidden divide-y divide-slate-150 dark:divide-slate-800 bg-white dark:bg-slate-900 relative">
+                  
+                  {/* Sticky Sort Bar */}
+                  <div className="sticky top-0 z-10 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-150 dark:border-slate-800 p-3 px-4 flex items-center justify-between text-xs">
+                    <div className="flex items-center gap-1.5 text-slate-500 dark:text-slate-400 font-bold uppercase tracking-wide">
+                      <ArrowUpDown className="h-3.5 w-3.5 text-amber-500" />
+                      <span>Sort By</span>
+                    </div>
+                    <select
+                      value={mobileSortBy}
+                      onChange={(e) => setMobileSortBy(e.target.value as any)}
+                      className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 dark:text-slate-200 focus:outline-none focus:border-amber-500"
+                    >
+                      <option value="Priority">Priority</option>
+                      <option value="Newest">Newest</option>
+                      <option value="Department">Department</option>
+                    </select>
+                  </div>
+
+                  {getSortedMobileOrders().length === 0 ? (
+                    <div className="text-center p-8 space-y-1.5">
+                      <span className="text-xl">🔍</span>
+                      <p className="text-xs font-semibold text-slate-400 font-mono">No matching Job Cards found</p>
+                    </div>
+                  ) : (
+                    getSortedMobileOrders().map(j => {
+                      const m = getJobCardProcessMetrics(j, movements);
+                      const totalTransferred = movements
+                        .filter(mov => mov.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase())
+                        .reduce((acc, curr) => acc + curr.quantity, 0);
+                      const pendingQty = j.orderQty - totalTransferred;
+                      
+                      return (
+                        <div key={j.jobCardNo} className="p-4 space-y-3">
+                          {/* Card Header: Job Card No & Status */}
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5 font-mono text-xs">
+                              <span className="font-bold text-indigo-500 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded">
+                                {j.jobCardNo}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-medium">
+                                @ {j.currentDepartment}
+                              </span>
+                            </div>
+                            <span className={`px-1.5 py-0.5 rounded text-[8.5px] font-bold border ${getBadgeStyle(j.status)}`}>
+                              {j.status}
+                            </span>
+                          </div>
+
+                          {/* Party and Item Details */}
+                          <div>
+                            <h4 className="font-bold text-slate-900 dark:text-white text-sm leading-tight">
+                              {j.partyName}
+                            </h4>
+                            <p className="text-xs text-slate-600 dark:text-slate-350 mt-0.5">
+                              {j.itemName} <span className="text-[10px] font-mono text-slate-400">({j.itemCode})</span>
+                            </p>
+                          </div>
+
+                          {/* Quantities & Mini Stage Tracker */}
+                          <div className="grid grid-cols-2 gap-2 bg-slate-50 dark:bg-slate-950 p-2 rounded-lg border border-slate-100 dark:border-slate-850 text-[11px]">
+                            <div>
+                              <span className="block text-[9px] text-slate-400 uppercase font-bold">Target Weight</span>
+                              <span className="font-bold font-mono text-slate-800 dark:text-slate-200">{j.orderQty.toLocaleString()} KG</span>
+                            </div>
+                            <div>
+                              <span className="block text-[9px] text-slate-400 uppercase font-bold">Pending Handoff</span>
+                              <span className="font-bold font-mono text-slate-800 dark:text-slate-200">{pendingQty.toLocaleString()} KG</span>
+                            </div>
+                          </div>
+
+                          {/* Stages Progress Indicator */}
+                          <div className="space-y-1.5 pt-1">
+                            <span className="block text-[9px] text-slate-400 uppercase font-bold tracking-wider">Line Progress Ledger</span>
+                            <div className="grid grid-cols-4 gap-1.5 text-center text-[9px] font-mono">
+                              <div className="bg-blue-50/50 dark:bg-blue-950/20 p-1.5 rounded border border-blue-100/30">
+                                <span className="block text-[8px] text-blue-800 dark:text-blue-300 font-bold uppercase">PROD</span>
+                                <span className="block font-bold text-slate-700 dark:text-slate-300">{m.qtyRemainingAtProd.toLocaleString()}</span>
+                              </div>
+                              <div className="bg-purple-50/50 dark:bg-purple-950/20 p-1.5 rounded border border-purple-100/30">
+                                <span className="block text-[8px] text-purple-800 dark:text-purple-300 font-bold uppercase">PLAT</span>
+                                <span className="block font-bold text-slate-700 dark:text-slate-300">{m.qtyRemainingAtPlating.toLocaleString()}</span>
+                              </div>
+                              <div className="bg-pink-50/50 dark:bg-pink-950/20 p-1.5 rounded border border-pink-100/30">
+                                <span className="block text-[8px] text-pink-800 dark:text-pink-300 font-bold uppercase">PACK</span>
+                                <span className="block font-bold text-slate-700 dark:text-slate-300">{m.qtyRemainingAtPacking.toLocaleString()}</span>
+                              </div>
+                              <div className="bg-emerald-50/50 dark:bg-emerald-950/20 p-1.5 rounded border border-emerald-100/30">
+                                <span className="block text-[8px] text-emerald-800 dark:text-emerald-300 font-bold uppercase">STOCK</span>
+                                <span className="block font-bold text-slate-700 dark:text-slate-300">{m.qtyRemainingInStock.toLocaleString()}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex items-center justify-between pt-1 border-t border-slate-100 dark:border-slate-800">
+                            <div>
+                              {pendingQty > 0 ? (
+                                <button
+                                  onClick={() => handleCreateSubJob(j)}
+                                  className="px-2 py-1 bg-amber-100 dark:bg-amber-900 text-amber-850 dark:text-amber-200 rounded text-[9px] font-extrabold uppercase hover:bg-amber-200 transition"
+                                >
+                                  Sub-Job
+                                </button>
+                              ) : (
+                                <span className="text-[9px] text-emerald-600 dark:text-emerald-450 font-bold uppercase">Fully Routed</span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={() => setSelectedJob(j)}
+                                className="text-[10px] font-extrabold text-amber-500 hover:bg-amber-500/10 px-2 py-1 rounded transition"
+                              >
+                                View Details
+                              </button>
+                              {(currentUser?.role === 'admin' || currentUser?.department === 'Admin') && (
+                                <button
+                                  onClick={async () => {
+                                    if (window.confirm(`Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible!`)) {
+                                      try {
+                                        await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                        alert(`Job Card ${j.jobCardNo} has been deleted successfully.`);
+                                        refreshAllStates();
+                                      } catch (err: any) {
+                                        console.error("Failed to delete job card", err);
+                                        alert(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`);
+                                      }
+                                    }
+                                  }}
+                                  className="p-1 px-1.5 rounded text-red-500 hover:bg-red-500/10 transition"
+                                  title="Admin: Delete Selected Job Card"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>

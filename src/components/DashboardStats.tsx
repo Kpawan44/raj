@@ -99,27 +99,29 @@ export default function DashboardStats({ department, jobCards, movements }: Dash
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-4 mb-4 sm:mb-6">
       {statsConfig.map((stat) => {
         const IconComponent = stat.icon;
         return (
           <div 
             key={stat.id}
             id={`kpi-card-${stat.id}`}
-            className={`p-5 rounded-xl shadow-sm hover:shadow-md transition-all duration-300 flex flex-col justify-between ${stat.color}`}
+            className={`p-3 sm:p-5 rounded-xl shadow-sm hover:shadow-md transition-all duration-300 flex flex-col justify-between ${stat.color} ${
+              stat.id === 'today-exports' ? 'col-span-2 sm:col-span-1' : ''
+            }`}
           >
             <div className="flex items-center justify-between pointer-events-none">
-              <span className="text-[11px] font-bold tracking-wider uppercase text-slate-500 dark:text-slate-400">
+              <span className="text-[9px] sm:text-[11px] font-bold tracking-wider uppercase text-slate-500 dark:text-slate-400 truncate">
                 {stat.title}
               </span>
-              <IconComponent className="h-5 w-5 opacity-75" />
+              <IconComponent className="h-4 w-4 sm:h-5 sm:w-5 opacity-75 shrink-0" />
             </div>
             
-            <div className="mt-3">
-              <h3 className="text-2xl font-bold tracking-tight text-slate-800 dark:text-slate-100">
+            <div className="mt-2 sm:mt-3">
+              <h3 className="text-base sm:text-2xl font-bold tracking-tight text-slate-800 dark:text-slate-100 truncate">
                 {stat.value}
               </h3>
-              <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 uppercase font-semibold">
+              <p className="text-[8px] sm:text-[10px] text-slate-500 dark:text-slate-400 mt-0.5 sm:mt-1 uppercase font-semibold truncate">
                 {stat.subtitle}
               </p>
             </div>

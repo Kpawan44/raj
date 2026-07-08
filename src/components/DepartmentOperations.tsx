@@ -404,10 +404,18 @@ export default function DepartmentOperations({
   // B. Job cards currently assigned to this department
   const activeDepartmentJobs = jobCards.filter(c => {
     if (c.completed) return false;
-    // If the job card is pending custody acceptance, it shouldn't show up in the operational/processing queue
-    // until the department operator accepts it. Dispatch can see all tracking states.
+    
+    // If the job card is pending custody acceptance BY THE CURRENT DEPARTMENT,
+    // it shouldn't show up in the operational/processing queue until accepted.
     if (c.status === 'Pending Acceptance' && activeDept !== 'Dispatch') {
-      return false;
+      const hasUnacceptedIncomingToMe = movements.some(m => 
+        m.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && 
+        m.toDepartment === activeDept && 
+        !m.accepted
+      );
+      if (hasUnacceptedIncomingToMe) {
+        return false;
+      }
     }
     // Dispatch owns tracking when completed or creating, otherwise matches exactly
     if (activeDept === 'Dispatch') {
@@ -490,10 +498,10 @@ export default function DepartmentOperations({
 
         {/* Local operation tabs switcher */}
         {activeDept !== 'Dispatch' && (
-          <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs text-slate-400 self-start md:self-auto shrink-0">
+          <div className="flex bg-slate-950 p-1 rounded-lg border border-slate-800 text-xs text-slate-400 overflow-x-auto max-w-full shrink-0">
             <button
               onClick={() => setActiveSubView('incoming')}
-              className={`px-3 py-1.5 rounded-md font-bold transition-all relative ${
+              className={`px-3 py-1.5 rounded-md font-bold transition-all relative whitespace-nowrap ${
                 activeSubView === 'incoming' ? 'bg-slate-800 text-white shadow' : 'hover:text-white'
               }`}
             >
@@ -506,7 +514,7 @@ export default function DepartmentOperations({
             </button>
             <button
               onClick={() => setActiveSubView('operations')}
-              className={`px-3 py-1.5 rounded-md font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-md font-bold transition-all whitespace-nowrap ${
                 activeSubView === 'operations' ? 'bg-slate-800 text-white shadow' : 'hover:text-white'
               }`}
             >
@@ -514,7 +522,7 @@ export default function DepartmentOperations({
             </button>
             <button
               onClick={() => setActiveSubView('completed')}
-              className={`px-3 py-1.5 rounded-md font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-md font-bold transition-all whitespace-nowrap ${
                 activeSubView === 'completed' ? 'bg-slate-800 text-white shadow' : 'hover:text-white'
               }`}
             >
