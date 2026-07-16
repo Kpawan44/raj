@@ -1,4 +1,4 @@
-export type Department = 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
+export type Department = 'Purchase' | 'Dispatch' | 'Production' | 'Heat Treatment' | 'Plating' | 'Packing' | 'Store';
 export type UserRole = 'admin' | 'staff';
 
 export interface UserProfile {
@@ -29,12 +29,21 @@ export interface JobCard {
   createdBy: string; // user name/id
   createdAt: string;
   completed: boolean;
+  processType?: 'Manufacturing' | 'Purchase';
   customRoutedToPlating?: number;
   customRoutedToPacking?: number;
   customRoutedToStore?: number;
   
   // Custom processing fields recorded from departments
   operatorName?: string;
+  purchaseDetails?: {
+    supplierName?: string;
+    billNo?: string;
+    receivedQty?: number;
+    rejectionQty?: number;
+    sentToStore?: number;
+    remarks?: string;
+  };
   heatTreatmentDetails?: {
     hardnessRequired?: string;
     temperature?: string;
@@ -64,15 +73,20 @@ export interface JobCard {
     qtyReceivedFromPlating?: number;
     qtySentToStore?: number;
     qtyRemaining?: number;
+    pcsPerBagOrBox?: number;
+    totalPcs?: number;
   };
   storeDetails?: {
     verifiedQty?: number;
     locationBin?: string;
+    rackNo?: string;
     remarks?: string;
     rejectionQty?: number;
     qtyReceivedFromPacking?: number;
     qtySentToDispatch?: number;
     qtyRemaining?: number;
+    pcsPerBagOrBox?: number;
+    totalPcs?: number;
   };
   dispatchDetails?: {
     invoiceNo?: string;
@@ -95,9 +109,28 @@ export interface MaterialMovement {
   acceptedBy?: string; // user name
   acceptedDate?: string;
   remarks?: string;
+  allottedLocation?: string;
+  rackNo?: string;
+  
+  // Dispatch issue request properties
+  isIssueRequest?: boolean;
+  requestedUnit?: 'PCS' | 'KGS';
+  requestedQty?: number;
+  issueStatus?: 'Pending' | 'Issued' | 'Rejected';
   
   // Specific data carried during transit
   processDetails?: Record<string, any>;
+
+  // Perfect Audit Trail Tracking
+  initiatedByUserId?: string;
+  initiatedByUserName?: string;
+  modifiedByUserId?: string;
+  modifiedByUserName?: string;
+  modifiedDate?: string;
+  modifiedAction?: string;
+  deletedByUserId?: string;
+  deletedByUserName?: string;
+  deletedDate?: string;
 }
 
 export interface AppNotification {
@@ -129,5 +162,29 @@ export interface CompanyConfig {
   logoUrl?: string; // in case we want support for generated or custom logos
   updatedBy?: string;
   updatedAt?: string;
+}
+
+export interface SavedItem {
+  id: string;
+  itemName: string;
+  itemCode: string;
+  createdAt?: string;
+}
+
+export interface SyncQueueOperation {
+  collection: string;
+  docId: string;
+  data?: any;
+  operation: 'set' | 'update' | 'delete';
+}
+
+export interface SyncQueueItem {
+  id: string;
+  action: string;
+  description: string;
+  timestamp: string;
+  status: 'pending' | 'failed' | 'synced';
+  error?: string;
+  operations: SyncQueueOperation[];
 }
 

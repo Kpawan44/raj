@@ -15,7 +15,8 @@ import {
   Sun,
   UserPlus,
   X,
-  Brain
+  Brain,
+  BookOpen
 } from 'lucide-react';
 import { Department, UserProfile, CompanyConfig } from '../types';
 import { isFirestoreOffline } from '../lib/firebase';
@@ -56,6 +57,7 @@ export default function Sidebar({
     { id: 'timeline-live', label: 'Real-Time Tracking', icon: Activity },
     { id: 'forecast', label: 'AI Production Forecast', icon: Brain },
     { id: 'reports', label: 'Reports & Analytics', icon: Layers },
+    { id: 'user-guide', label: 'User Guide & Manual', icon: BookOpen },
   ];
 
   if (isSystemAdmin) {
@@ -146,7 +148,7 @@ export default function Sidebar({
             <button
               key={item.id}
               onClick={() => setActiveTab(item.id)}
-              className={`w-full flex items-center gap-3 px-4 py-2.5 text-xs font-semibold transition-all duration-200 text-left cursor-pointer ${
+              className={`w-full flex items-center gap-3 px-4 py-3 lg:py-2.5 min-h-[44px] text-sm lg:text-xs font-semibold transition-all duration-200 text-left cursor-pointer ${
                 isActive 
                   ? 'bg-[#1E293B] text-white border-l-4 border-[#3B82F6] opacity-100 pl-3' 
                   : 'text-[#E2E8F0] opacity-70 hover:opacity-100 hover:bg-[#1E293B] pl-4'
@@ -177,27 +179,29 @@ export default function Sidebar({
       </div>
 
       {/* DEMO Persona Switcher Block */}
-      <div className="p-3 bg-[#0F172A]/90 border-t border-[#1E293B]">
-        <label className="block text-[9px] text-[#3B82F6] font-bold uppercase tracking-wider mb-1.5">
-          🛠️ Simulate Persona
-        </label>
-        <div className="relative">
-          <select
-            value={currentUser.userId}
-            onChange={(e) => onSwitchUser(e.target.value)}
-            className="w-full bg-[#1E293B] text-white text-[11px] py-1.5 px-2 pr-6 rounded border border-slate-700 focus:outline-none focus:border-[#3B82F6] cursor-pointer appearance-none"
-          >
-            {availableUsers.map(user => (
-              <option key={user.userId} value={user.userId}>
-                {user.department} - {user.name}
-              </option>
-            ))}
-          </select>
-          <div className="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none text-slate-400">
-            <UserPlus className="h-3 w-3" />
+      {isSystemAdmin && (
+        <div className="p-3 bg-[#0F172A]/90 border-t border-[#1E293B]">
+          <label className="block text-[9px] text-[#3B82F6] font-bold uppercase tracking-wider mb-1.5">
+            🛠️ Simulate Persona
+          </label>
+          <div className="relative">
+            <select
+              value={currentUser.userId}
+              onChange={(e) => onSwitchUser(e.target.value)}
+              className="w-full bg-[#1E293B] text-white text-[11px] py-1.5 px-2 pr-6 rounded border border-slate-700 focus:outline-none focus:border-[#3B82F6] cursor-pointer appearance-none"
+            >
+              {availableUsers.map(user => (
+                <option key={user.userId} value={user.userId}>
+                  {user.department} - {user.name}
+                </option>
+              ))}
+            </select>
+            <div className="absolute inset-y-0 right-0 flex items-center pr-2 pointer-events-none text-slate-400">
+              <UserPlus className="h-3 w-3" />
+            </div>
           </div>
         </div>
-      </div>
+      )}
     </aside>
   );
 }

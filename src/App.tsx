@@ -23,10 +23,23 @@ import {
   Trash2,
   Printer,
   QrCode,
-  ArrowUpDown
+  ArrowUpDown,
+  Layers,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  ChevronUp,
+  ChevronDown,
+  List,
+  Database,
+  AlertTriangle,
+  Brain,
+  FileText,
+  Users
 } from 'lucide-react';
 import { DBService, auth } from './lib/firebase';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus } from './types';
+import { runDailyAutoBackupIfNeeded } from './lib/backup';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SyncQueueItem } from './types';
 import { signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
 import { 
   getSpreadsheetDetails, 
@@ -51,6 +64,10 @@ import ReportView from './components/ReportView';
 import AdminConsole from './components/AdminConsole';
 import TimelineVisual from './components/TimelineVisual';
 import GoogleSheetViewer from './components/GoogleSheetViewer';
+import QuickTransferModal from './components/QuickTransferModal';
+import BulkTransferModal from './components/BulkTransferModal';
+import BulkPrintManifestModal from './components/BulkPrintManifestModal';
+import UserGuide from './components/UserGuide';
 import { getJobCardProcessMetrics } from './lib/metrics';
 
 export default function App() {
@@ -166,6 +183,105 @@ export default function App() {
     }
     isSwiping.current = false;
   };
+
+  // --- HORIZONTAL SWIPE GESTURE FOR MAIN VIEW NAVIGATION ON MOBILE ---
+  const mainTouchStartX = useRef<number>(0);
+  const mainTouchStartY = useRef<number>(0);
+  const mainTouchCurrentX = useRef<number>(0);
+  const mainIsSwiping = useRef<boolean>(false);
+
+  const handleMainTouchStart = (e: React.TouchEvent) => {
+    if (window.innerWidth >= 1024) return;
+    const target = e.target as HTMLElement;
+    if (target && typeof target.closest === 'function') {
+      if (
+        target.closest('.overflow-x-auto') || 
+        target.closest('.no-swipe-nav') || 
+        target.closest('table') || 
+        target.closest('input') || 
+        target.closest('textarea') || 
+        target.closest('select') ||
+        target.closest('#timeline-chart-container')
+      ) {
+        return;
+      }
+    }
+    mainTouchStartX.current = e.touches[0].clientX;
+    mainTouchStartY.current = e.touches[0].clientY;
+    mainTouchCurrentX.current = e.touches[0].clientX;
+    mainIsSwiping.current = false;
+  };
+
+  const handleMainTouchMove = (e: React.TouchEvent) => {
+    if (window.innerWidth >= 1024) return;
+    const target = e.target as HTMLElement;
+    if (target && typeof target.closest === 'function') {
+      if (
+        target.closest('.overflow-x-auto') || 
+        target.closest('.no-swipe-nav') || 
+        target.closest('table') ||
+        target.closest('#timeline-chart-container')
+      ) {
+        return;
+      }
+    }
+    const currentX = e.touches[0].clientX;
+    const currentY = e.touches[0].clientY;
+    const deltaX = currentX - mainTouchStartX.current;
+    const deltaY = currentY - mainTouchStartY.current;
+
+    if (!mainIsSwiping.current) {
+      const absDeltaX = Math.abs(deltaX);
+      const absDeltaY = Math.abs(deltaY);
+      if (absDeltaX > absDeltaY && absDeltaX > 15 && absDeltaY < 30) {
+        mainIsSwiping.current = true;
+      }
+    }
+    if (mainIsSwiping.current) {
+      mainTouchCurrentX.current = currentX;
+    }
+  };
+
+  const handleMainTouchEnd = () => {
+    if (window.innerWidth >= 1024 || !mainIsSwiping.current) return;
+    
+    const deltaX = mainTouchCurrentX.current - mainTouchStartX.current;
+    const isSystemAdmin = currentUser?.role === 'admin' || currentUser?.department === 'Admin';
+    const tabs = ['dashboard', 'all-orders', 'timeline-live', 'forecast'];
+    if (isSystemAdmin) {
+      tabs.push('admin-users');
+    }
+    const currentIndex = tabs.indexOf(activeTab);
+
+    if (Math.abs(deltaX) > 75 && currentIndex !== -1) {
+      if (deltaX < 0) {
+        // Swipe Left -> Next Tab
+        if (currentIndex < tabs.length - 1) {
+          setActiveTab(tabs[currentIndex + 1]);
+          setSelectedJobCardNos([]);
+          showToast(`Switching to: ${
+            tabs[currentIndex + 1] === 'dashboard' ? 'Department Panel' : 
+            tabs[currentIndex + 1] === 'all-orders' ? 'All Job Cards' : 
+            tabs[currentIndex + 1] === 'timeline-live' ? 'Real-Time Tracking' : 
+            tabs[currentIndex + 1] === 'forecast' ? 'AI Production Forecast' : 'User & Plant Manager'
+          }`, "info");
+        }
+      } else {
+        // Swipe Right -> Prev Tab
+        if (currentIndex > 0) {
+          setActiveTab(tabs[currentIndex - 1]);
+          setSelectedJobCardNos([]);
+          showToast(`Switching to: ${
+            tabs[currentIndex - 1] === 'dashboard' ? 'Department Panel' : 
+            tabs[currentIndex - 1] === 'all-orders' ? 'All Job Cards' : 
+            tabs[currentIndex - 1] === 'timeline-live' ? 'Real-Time Tracking' : 
+            tabs[currentIndex - 1] === 'forecast' ? 'AI Production Forecast' : 'User & Plant Manager'
+          }`, "info");
+        }
+      }
+    }
+    mainIsSwiping.current = false;
+  };
   
   // --- GOOGLE WORKSPACE SYNC ---
   const [sheetsDetails, setSheetsDetails] = useState(getSpreadsheetDetails());
@@ -174,14 +290,54 @@ export default function App() {
   const [sheetsModalTab, setSheetsModalTab] = useState<'cloud' | 'offline'>('cloud');
   const [sheetsFeedback, setSheetsFeedback] = useState('');
   const [showSheetsInspector, setShowSheetsInspector] = useState(false);
+  const [showEmulatedSheetsBtn, setShowEmulatedSheetsBtn] = useState(false);
   
   // --- MODALS AND DRILLS ---
   const [selectedJob, setSelectedJob] = useState<JobCard | null>(null);
+  const [quickTransferJob, setQuickTransferJob] = useState<JobCard | null>(null);
+  const [selectedJobCardNos, setSelectedJobCardNos] = useState<string[]>([]);
+  const [showBulkTransferModal, setShowBulkTransferModal] = useState(false);
+  const [showBulkPrintModal, setShowBulkPrintModal] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const [showNotificationsDropdown, setShowNotificationsDropdown] = useState(false);
 
   // --- NON-BLOCKING TOASTS & CONFIRMATIONS ---
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [syncQueue, setSyncQueue] = useState<SyncQueueItem[]>([]);
+  const [showSyncDrawer, setShowSyncDrawer] = useState(false);
+  const [retryingIds, setRetryingIds] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    // Initial load
+    setSyncQueue(DBService.getSyncQueue());
+
+    const handleSyncQueueUpdate = () => {
+      setSyncQueue(DBService.getSyncQueue());
+    };
+
+    const handleOnline = () => {
+      setIsOnline(true);
+      showToast("Connection Restored! Automatically synchronizing offline changes...", "success");
+      refreshAllStates();
+      DBService.retryAllSyncItems();
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+      showToast("System Offline. Working securely from local persistent cache.", "info");
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('sync-queue-updated', handleSyncQueueUpdate);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('sync-queue-updated', handleSyncQueueUpdate);
+    };
+  }, []);
   const [confirmDialog, setConfirmDialog] = useState<{
     title: string;
     message: string;
@@ -205,6 +361,7 @@ export default function App() {
   const [allOrdersSearch, setAllOrdersSearch] = useState('');
   const [allOrdersDeptFilter, setAllOrdersDeptFilter] = useState<string>('All');
   const [allOrdersStatusFilter, setAllOrdersStatusFilter] = useState<string>('All');
+  const [allOrdersMyDeptOnly, setAllOrdersMyDeptOnly] = useState(false);
   const [mobileSortBy, setMobileSortBy] = useState<'Priority' | 'Newest' | 'Department'>('Priority');
 
   // --- LOAD INITIAL DATASE ---
@@ -258,6 +415,17 @@ export default function App() {
 
   useEffect(() => {
     refreshAllStates();
+
+    // Trigger daily automated backup if day has changed
+    runDailyAutoBackupIfNeeded()
+      .then((backup) => {
+        if (backup) {
+          showToast(`Daily automated database backup completed: ${backup.filename}`, 'success');
+        }
+      })
+      .catch((err) => {
+        console.warn('Daily auto-backup check failed:', err);
+      });
 
     // Debounce the refresh triggers to avoid flooding database connections on initial mount / batch updates
     let refreshTimeout: NodeJS.Timeout | null = null;
@@ -494,16 +662,40 @@ export default function App() {
     try {
       await DBService.createMovement(mov, currentUser.userId, currentUser.name);
       refreshAllStates();
+      showToast(`Successfully transferred ${mov.quantity} KG of ${mov.jobCardNo} from ${mov.fromDepartment} to ${mov.toDepartment}!`, "success");
     } catch (err: any) {
       console.error("Failed to transfer material", err);
       showToast(`Failed to transfer material: ${err instanceof Error ? err.message : String(err)}`, "error");
+      throw err;
     }
   };
 
-  const handleAcceptMovement = async (movementId: string, remarks?: string) => {
+  const handleBulkTransfer = async (transfers: any[]) => {
     if (!currentUser) return;
     try {
-      await DBService.acceptMovement(movementId, currentUser.userId, currentUser.name, remarks);
+      let successCount = 0;
+      for (const t of transfers) {
+        await DBService.createMovement(t, currentUser.userId, currentUser.name);
+        successCount++;
+      }
+      refreshAllStates();
+      setSelectedJobCardNos([]);
+      showToast(`Successfully bulk transferred ${successCount} job cards!`, "success");
+    } catch (err: any) {
+      console.error("Failed to execute bulk transfers", err);
+      showToast(`Bulk transfer partially succeeded. Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      refreshAllStates();
+    }
+  };
+
+  const handleAcceptMovement = async (
+    movementId: string, 
+    remarks?: string, 
+    extraFields?: { allottedLocation?: string; rackNo?: string; quantity?: number; issueStatus?: 'Issued' | 'Rejected' }
+  ) => {
+    if (!currentUser) return;
+    try {
+      await DBService.acceptMovement(movementId, currentUser.userId, currentUser.name, remarks, extraFields);
       refreshAllStates();
     } catch (err: any) {
       console.error("Failed to accept movement", err);
@@ -522,9 +714,38 @@ export default function App() {
     }
   };
 
+  const handleUpdateMovement = async (movementId: string, quantity: number, remarks: string) => {
+    if (!currentUser) return;
+    try {
+      await DBService.updateMovement(movementId, quantity, remarks, currentUser.userId, currentUser.name);
+      refreshAllStates();
+      showToast(`Successfully modified material movement ${movementId}!`, "success");
+    } catch (err: any) {
+      console.error("Failed to update movement", err);
+      showToast(`Failed to modify material transfer: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  };
+
+  const handleDeleteMovement = async (movementId: string) => {
+    if (!currentUser) return;
+    try {
+      await DBService.deleteMovement(movementId, currentUser.userId, currentUser.name);
+      refreshAllStates();
+      showToast(`Successfully deleted material movement ${movementId}!`, "success");
+    } catch (err: any) {
+      console.error("Failed to delete movement", err);
+      showToast(`Failed to delete material transfer: ${err instanceof Error ? err.message : String(err)}`, "error");
+    }
+  };
+
   const handleSaveUserProfile = async (profile: UserProfile) => {
-    await DBService.saveUser(profile);
-    refreshAllStates();
+    try {
+      await DBService.saveUser(profile);
+      refreshAllStates();
+    } catch (err: any) {
+      console.error("Failed to save user profile", err);
+      showToast(err instanceof Error ? err.message : "Failed to save user profile.", "error");
+    }
   };
 
   const handleDeleteUserProfile = async (userId: string, userName: string) => {
@@ -546,8 +767,35 @@ export default function App() {
   };
 
   // --- GOOGLE WORKSPACE ACTION HANDLERS ---
+  const handleConnectEmulatedSheets = async () => {
+    setSheetsFeedback('Initializing "Factory Material Flow Ledger" Simulation...');
+    try {
+      const token = 'dev-simulated-token-99933211-' + Math.random().toString(36).substring(7);
+      setGoogleAccessToken(token);
+      
+      const id = await initializeSpreadsheet();
+      const details = getSpreadsheetDetails();
+      setSheetsDetails(details);
+      setIsSheetsActive(true);
+      setSheetsFeedback('');
+      setShowSheetsModal(false);
+      setShowEmulatedSheetsBtn(false);
+      
+      await DBService.logAction(
+        currentUser?.userId || 'unknown',
+        currentUser?.name || 'unknown',
+        'CONNECT_GOOGLE_SHEETS',
+        `Linked Google Spreadsheet "${details.name}" in high-fidelity sandbox simulation mode.`
+      );
+    } catch (err: any) {
+      console.error(err);
+      setSheetsFeedback('Failed to initialize emulated sheets: ' + err.message);
+    }
+  };
+
   const handleConnectGoogleSheets = async () => {
     setSheetsFeedback('Connecting to Google Account...');
+    setShowEmulatedSheetsBtn(false);
     try {
       const provider = new GoogleAuthProvider();
       provider.addScope('https://www.googleapis.com/auth/spreadsheets');
@@ -556,9 +804,20 @@ export default function App() {
       let token = '';
       if (auth) {
         // Handle popup blocker gracefully
-        const result = await signInWithPopup(auth, provider);
-        const credential = GoogleAuthProvider.credentialFromResult(result);
-        token = credential?.accessToken || '';
+        try {
+          const result = await signInWithPopup(auth, provider);
+          const credential = GoogleAuthProvider.credentialFromResult(result);
+          token = credential?.accessToken || '';
+        } catch (authErr: any) {
+          const isNetworkErr = authErr.message?.includes('network-request-failed') || authErr.code?.includes('network-request-failed');
+          if (isNetworkErr) {
+            console.warn("Firebase Auth failed due to network constraints inside the preview iframe.", authErr);
+            setShowEmulatedSheetsBtn(true);
+            throw new Error("Authentication failed due to iframe restrictions or third-party cookie blocking. Click below to connect via Sandbox Emulation.");
+          } else {
+            throw authErr;
+          }
+        }
       } else {
         // Support emulation for high-fidelity offline tests
         token = 'dev-simulated-token-99933211-' + Math.random().toString(36).substring(7);
@@ -586,7 +845,8 @@ export default function App() {
       );
     } catch (err: any) {
       console.error(err);
-      setSheetsFeedback('Failed: ' + err.message);
+      setSheetsFeedback(err.message || String(err));
+      setShowEmulatedSheetsBtn(true);
     }
   };
 
@@ -601,6 +861,47 @@ export default function App() {
       'DISCONNECT_GOOGLE_SHEETS',
       `Unlinked Google Spreadsheet ledger connection.`
     );
+  };
+
+  // --- SYNC QUEUE RETRY HANDLERS ---
+  const handleManualRetryItem = async (id: string, actionName: string) => {
+    setRetryingIds(prev => ({ ...prev, [id]: true }));
+    showToast(`Retrying sync for: ${actionName}...`, 'info');
+    const success = await DBService.retrySyncItem(id);
+    setRetryingIds(prev => ({ ...prev, [id]: false }));
+    if (success) {
+      showToast(`Successfully synced: ${actionName}`, 'success');
+      refreshAllStates();
+    } else {
+      showToast(`Sync failed for: ${actionName}. Still offline or permission denied.`, 'error');
+    }
+  };
+
+  const handleManualRetryAll = async () => {
+    showToast("Retrying all pending/failed offline transactions...", "info");
+    const queue = DBService.getSyncQueue();
+    const pendingAndFailed = queue.filter(item => item.status === 'pending' || item.status === 'failed');
+    if (pendingAndFailed.length === 0) {
+      showToast("No pending or failed items in the queue.", "info");
+      return;
+    }
+    
+    let successCount = 0;
+    for (const item of pendingAndFailed) {
+      setRetryingIds(prev => ({ ...prev, [item.id]: true }));
+      const success = await DBService.retrySyncItem(item.id);
+      setRetryingIds(prev => ({ ...prev, [item.id]: false }));
+      if (success) {
+        successCount++;
+      }
+    }
+    
+    if (successCount > 0) {
+      showToast(`Successfully synchronized ${successCount} transactions!`, 'success');
+      refreshAllStates();
+    } else {
+      showToast("Sync retry completed. Unable to connect or authorize writes.", 'error');
+    }
   };
 
   // --- ATTACHMENTS MANAGER ---
@@ -664,7 +965,15 @@ export default function App() {
       // 3. Status
       const statusMatch = allOrdersStatusFilter === 'All' || j.status === allOrdersStatusFilter;
 
-      return searchMatch && deptMatch && statusMatch;
+      // 4. My Department Only
+      const myDeptMatch = !allOrdersMyDeptOnly || (
+        currentUser && (
+          currentUser.department === 'Admin' || 
+          j.currentDepartment === currentUser.department
+        )
+      );
+
+      return searchMatch && deptMatch && statusMatch && myDeptMatch;
     });
   };
 
@@ -680,6 +989,7 @@ export default function App() {
     
     if (mobileSortBy === 'Department') {
       const deptOrder: Record<string, number> = {
+        'Purchase': 0,
         'Production': 1,
         'Heat Treatment': 2,
         'Plating': 3,
@@ -733,11 +1043,36 @@ export default function App() {
     await DBService.markNotificationRead(id);
     await refreshAllStates();
   };
+  
+  const handleDeleteNotif = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    try {
+      await DBService.deleteNotification(id);
+      await refreshAllStates();
+      showToast("Notification removed.", "success");
+    } catch (err: any) {
+      console.error("Failed to delete notification", err);
+      showToast(`Failed to delete notification: ${err.message || String(err)}`, "error");
+    }
+  };
 
   const handleMarkAllNotifsRead = async () => {
     const dept = activeDepartment || 'All';
-    await DBService.clearAllNotifications(dept);
+    await DBService.markAllNotificationsRead(dept);
     await refreshAllStates();
+    setShowNotificationsDropdown(false);
+  };
+
+  const handleClearAllNotifs = async () => {
+    const dept = activeDepartment || 'All';
+    try {
+      await DBService.clearAllNotifications(dept);
+      await refreshAllStates();
+      showToast("All announcements have been cleared successfully.", "success");
+    } catch (err: any) {
+      console.error("Failed to clear notifications", err);
+      showToast(`Failed to clear notifications: ${err.message || String(err)}`, "error");
+    }
     setShowNotificationsDropdown(false);
   };
 
@@ -935,6 +1270,7 @@ export default function App() {
           activeTab={activeTab}
           setActiveTab={(tab) => {
             setActiveTab(tab);
+            setSelectedJobCardNos([]);
             if (window.innerWidth < 1024) {
               setSidebarOpen(false);
             }
@@ -965,6 +1301,23 @@ export default function App() {
             <span className="text-xs text-slate-500 font-bold uppercase tracking-wider bg-[#F1F5F9] dark:bg-slate-850 py-1 px-3 rounded-full font-mono hidden sm:inline-block">
               Active Plant: Site #1
             </span>
+            <div className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-semibold border font-sans select-none ${
+              isOnline 
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/20 dark:text-emerald-400 dark:border-emerald-900/40' 
+                : 'bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/20 dark:text-amber-400 dark:border-amber-900/40'
+            }`} title={isOnline ? "System connected and syncing with Cloud database" : "Working offline. Transactions are queued and will automatically sync upon connection restore."}>
+              {isOnline ? (
+                <>
+                  <Wifi className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                  <span>Cloud Synced</span>
+                </>
+              ) : (
+                <>
+                  <WifiOff className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400 animate-bounce" />
+                  <span className="animate-pulse">Offline Mode</span>
+                </>
+              )}
+            </div>
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3 relative">
@@ -1037,12 +1390,23 @@ export default function App() {
                     <span className="font-bold text-xs text-slate-905 dark:text-white uppercase tracking-wider">
                       Announcements Ledger ({filteredNotifications.length})
                     </span>
-                    <button 
-                      onClick={handleMarkAllNotifsRead}
-                      className="text-[10px] text-[#3B82F6] hover:underline font-bold cursor-pointer"
-                    >
-                      Clear All
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={handleMarkAllNotifsRead}
+                        className="text-[10px] text-[#3B82F6] hover:underline font-bold cursor-pointer"
+                        title="Mark all as read"
+                      >
+                        Mark Read
+                      </button>
+                      <span className="text-slate-300 dark:text-slate-700 text-[10px]">|</span>
+                      <button 
+                        onClick={handleClearAllNotifs}
+                        className="text-[10px] text-rose-500 hover:underline font-bold cursor-pointer"
+                        title="Clear all alerts"
+                      >
+                        Clear All
+                      </button>
+                    </div>
                   </div>
 
                   {filteredNotifications.length === 0 ? (
@@ -1053,19 +1417,28 @@ export default function App() {
                         <div 
                           key={notif.notificationId}
                           onClick={() => handleMarkNotifRead(notif.notificationId)}
-                          className={`p-2 rounded-lg text-[11px] border transition cursor-pointer ${
+                          className={`p-2 rounded-lg text-[11px] border transition cursor-pointer relative group ${
                             notif.read 
                               ? 'bg-slate-50 dark:bg-slate-950/20 border-slate-100 dark:border-slate-850 text-slate-500' 
                               : 'bg-blue-500/10 border-blue-500/25 text-slate-800 dark:text-blue-400 font-medium'
                           }`}
                         >
-                          <div className="flex items-center justify-between">
-                            <strong>{notif.title}</strong>
-                            <span className="font-mono text-[8px] text-slate-400">
-                              {new Date(notif.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
-                            </span>
+                          <div className="flex items-start justify-between gap-2">
+                            <strong className="pr-4">{notif.title}</strong>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <span className="font-mono text-[8px] text-slate-400">
+                                {new Date(notif.createdAt).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+                              </span>
+                              <button
+                                onClick={(e) => handleDeleteNotif(e, notif.notificationId)}
+                                className="p-0.5 rounded hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-400 hover:text-rose-500 transition cursor-pointer"
+                                title="Dismiss notification"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
                           </div>
-                          <p className="mt-1 leading-normal text-slate-600 dark:text-slate-350">{notif.message}</p>
+                          <p className="mt-1 leading-normal text-slate-600 dark:text-slate-350 pr-4">{notif.message}</p>
                         </div>
                       ))}
                     </div>
@@ -1086,7 +1459,12 @@ export default function App() {
         </header>
 
         {/* 3. SCROLLABLE OPERATIONS CONTAINER */}
-        <div className="flex-1 p-3 sm:p-6 space-y-4 sm:space-y-6 overflow-y-auto bg-[#F8FAFC] dark:bg-slate-950 print:p-0 print:overflow-visible">
+        <div 
+          onTouchStart={handleMainTouchStart}
+          onTouchMove={handleMainTouchMove}
+          onTouchEnd={handleMainTouchEnd}
+          className="flex-1 p-3 sm:p-6 pb-24 lg:pb-6 space-y-4 sm:space-y-6 overflow-y-auto bg-[#F8FAFC] dark:bg-slate-950 print:p-0 print:overflow-visible"
+        >
           
           {/* Active stats display overview row */}
           {activeTab === 'dashboard' && (
@@ -1120,69 +1498,120 @@ export default function App() {
           )}
 
           {/* ALL ORDERS GRID VIEW */}
-          {activeTab === 'all-orders' && (
-            <div className="space-y-4">
-              
-              {/* Header Titles */}
-              <div className="flex justify-between items-center px-1">
-                <div>
-                  <h3 className="font-sans font-bold text-lg text-slate-805 dark:text-white uppercase tracking-wider">
-                    Manufacturing Job Cards Database
-                  </h3>
-                  <p className="text-xs text-slate-400 italic">Entire plant ledger registry containing live queues</p>
-                </div>
-              </div>
-
-              {/* Grid search and filtration row */}
-              <div className="bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col md:flex-row gap-3 items-center justify-between text-xs">
+          {activeTab === 'all-orders' && (() => {
+            const visibleAllOrders = filteredAllOrders.slice(0, 100);
+            const allVisibleSelected = visibleAllOrders.length > 0 && visibleAllOrders.every(j => selectedJobCardNos.includes(j.jobCardNo));
+            return (
+              <div className="space-y-4">
                 
-                {/* Search string */}
-                <div className="relative w-full md:w-80">
-                  <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
-                  <input
-                    type="text"
-                    placeholder="Search by Job Card No, Party Name, Item..."
-                    value={allOrdersSearch}
-                    onChange={(e) => setAllOrdersSearch(e.target.value)}
-                    className="bg-slate-50 dark:bg-slate-850 pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-210 dark:border-slate-750 w-full focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-
-                {/* Dropdowns */}
-                <div className="flex flex-wrap gap-2.5 items-center w-full md:w-auto">
-                  <div className="flex items-center gap-1.5">
-                    <Filter className="h-3.5 w-3.5 text-slate-400" />
-                    <span className="text-slate-400 text-[11px] uppercase font-bold">Line Filter</span>
+                {/* Header Titles */}
+                <div className="flex justify-between items-center px-1">
+                  <div>
+                    <h3 className="font-sans font-bold text-lg text-slate-805 dark:text-white uppercase tracking-wider">
+                      Manufacturing Job Cards Database
+                    </h3>
+                    <p className="text-xs text-slate-400 italic">Entire plant ledger registry containing live queues</p>
                   </div>
-                  
-                  <select
-                    value={allOrdersDeptFilter}
-                    onChange={(e) => setAllOrdersDeptFilter(e.target.value)}
-                    className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none"
-                  >
-                    <option value="All">All Lines</option>
-                    <option value="Production">Production Milling</option>
-                    <option value="Heat Treatment">Heat Treatment Line</option>
-                    <option value="Plating">Surface Plating</option>
-                    <option value="Packing">Packing Line</option>
-                    <option value="Store">Storehouse</option>
-                    <option value="Completed">Completed Dispatch</option>
-                  </select>
-
-                  <select
-                    value={allOrdersStatusFilter}
-                    onChange={(e) => setAllOrdersStatusFilter(e.target.value)}
-                    className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none"
-                  >
-                    <option value="All">All Statuses</option>
-                    <option value="Pending">Pending</option>
-                    <option value="In Process">In Process</option>
-                    <option value="Pending Acceptance">Pending Acceptance</option>
-                    <option value="Rejected">Rejected</option>
-                    <option value="Completed">Completed</option>
-                  </select>
                 </div>
-              </div>
+
+                {/* Grid search and filtration row */}
+                <div className="bg-white dark:bg-slate-900 p-4 border border-slate-200 dark:border-slate-800 rounded-2xl flex flex-col md:flex-row gap-3 items-center justify-between text-xs">
+                  
+                  {/* Search string */}
+                  <div className="relative w-full md:w-80">
+                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Search by Job Card No, Party Name, Item..."
+                      value={allOrdersSearch}
+                      onChange={(e) => setAllOrdersSearch(e.target.value)}
+                      className="bg-slate-50 dark:bg-slate-850 pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-210 dark:border-slate-750 w-full focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+
+                  {/* Dropdowns */}
+                  <div className="flex flex-wrap gap-2.5 items-center w-full md:w-auto">
+                    <div className="flex items-center gap-1.5">
+                      <Filter className="h-3.5 w-3.5 text-slate-400" />
+                      <span className="text-slate-400 text-[11px] uppercase font-bold">Line Filter</span>
+                    </div>
+                    
+                    <select
+                      value={allOrdersDeptFilter}
+                      onChange={(e) => setAllOrdersDeptFilter(e.target.value)}
+                      className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none"
+                    >
+                      <option value="All">All Lines</option>
+                      <option value="Purchase">Purchase Inward</option>
+                      <option value="Production">Production Milling</option>
+                      <option value="Heat Treatment">Heat Treatment Line</option>
+                      <option value="Plating">Surface Plating</option>
+                      <option value="Packing">Packing Line</option>
+                      <option value="Store">Storehouse</option>
+                      <option value="Completed">Completed Dispatch</option>
+                    </select>
+
+                    <select
+                      value={allOrdersStatusFilter}
+                      onChange={(e) => setAllOrdersStatusFilter(e.target.value)}
+                      className="bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-750 px-2.5 py-1.5 rounded-lg text-slate-700 dark:text-slate-200 focus:outline-none"
+                    >
+                      <option value="All">All Statuses</option>
+                      <option value="Pending">Pending</option>
+                      <option value="In Process">In Process</option>
+                      <option value="Pending Acceptance">Pending Acceptance</option>
+                      <option value="Rejected">Rejected</option>
+                      <option value="Completed">Completed</option>
+                    </select>
+
+                    <label className="flex items-center gap-2 cursor-pointer bg-slate-50 dark:bg-slate-850 px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-750 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition select-none" id="my_dept_toggle_label">
+                      <input
+                        type="checkbox"
+                        checked={allOrdersMyDeptOnly}
+                        onChange={(e) => setAllOrdersMyDeptOnly(e.target.checked)}
+                        className="rounded border-slate-350 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                        id="toggle_all_orders_my_dept"
+                      />
+                      <span className="font-sans text-[11px] font-bold uppercase tracking-wider">
+                        My Dept Only {currentUser?.department && currentUser.department !== 'Admin' ? `(${currentUser.department})` : ''}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Bulk Actions Panel */}
+                {selectedJobCardNos.length > 0 && (
+                  <div className="bg-indigo-50 dark:bg-indigo-950/25 border border-indigo-150 dark:border-indigo-900/40 p-3 px-4 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
+                    <div className="flex items-center gap-2">
+                      <span className="h-2.5 w-2.5 rounded-full bg-indigo-500 animate-pulse" />
+                      <span className="font-bold text-indigo-900 dark:text-indigo-200">
+                        {selectedJobCardNos.length} Job Card{selectedJobCardNos.length > 1 ? 's' : ''} Selected for Transit
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
+                      <button
+                        onClick={() => setSelectedJobCardNos([])}
+                        className="px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-850 font-bold text-slate-600 dark:text-slate-350 transition cursor-pointer"
+                      >
+                        Clear Selection
+                      </button>
+                      <button
+                        onClick={() => setShowBulkPrintModal(true)}
+                        className="px-4 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-750 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 font-extrabold shadow-sm transition flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Printer className="h-3.5 w-3.5 text-slate-500 dark:text-slate-400" />
+                        <span>Print Selection</span>
+                      </button>
+                      <button
+                        onClick={() => setShowBulkTransferModal(true)}
+                        className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold shadow-sm shadow-indigo-600/10 transition flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <ArrowUpDown className="h-3.5 w-3.5" />
+                        <span>Bulk Transfer Selected</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
 
               {/* Grid table */}
               <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
@@ -1197,6 +1626,28 @@ export default function App() {
                     <table className="w-full text-left border-collapse text-xs">
                       <thead>
                         <tr className="bg-slate-50 dark:bg-slate-950 text-[10px] text-slate-405 uppercase tracking-wider font-mono border-b border-slate-200 dark:border-slate-800">
+                          <th className="py-3 px-3 text-center w-10 shrink-0">
+                            <input 
+                              type="checkbox"
+                              checked={allVisibleSelected}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedJobCardNos(prev => {
+                                    const next = [...prev];
+                                    visibleAllOrders.forEach(j => {
+                                      if (!next.includes(j.jobCardNo)) {
+                                        next.push(j.jobCardNo);
+                                      }
+                                    });
+                                    return next;
+                                  });
+                                } else {
+                                  setSelectedJobCardNos(prev => prev.filter(no => !visibleAllOrders.some(v => v.jobCardNo === no)));
+                                }
+                              }}
+                              className="rounded border-slate-350 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                            />
+                          </th>
                           <th className="py-3 px-3">Job Card</th>
                           <th className="py-3 px-3">Party Name</th>
                           <th className="py-3 px-3">Item Details</th>
@@ -1216,7 +1667,8 @@ export default function App() {
                           
                           {/* Packing Stage columns */}
                           <th className="py-3 px-2 bg-pink-50/55 dark:bg-pink-950/25 text-pink-800 dark:text-pink-300 font-bold text-center">Recv (PACK)</th>
-                          <th className="py-3 px-2 bg-pink-50/55 dark:bg-pink-950/25 text-pink-800 dark:text-pink-300 font-bold border-x border-slate-200/50 dark:border-slate-800/40 text-center">Rout (STOR)</th>
+                          <th className="py-3 px-2 bg-pink-50/55 dark:bg-pink-950/25 text-pink-800 dark:text-pink-300 font-bold border-l border-slate-200/50 dark:border-slate-800/40 text-center">Rout (STOR)</th>
+                          <th className="py-3 px-2 bg-pink-50/55 dark:bg-pink-950/25 text-pink-800 dark:text-pink-300 font-bold border-x border-slate-200/50 dark:border-slate-800/40 text-center">Pieces (PACK)</th>
                           <th className="py-3 px-2 bg-pink-50/55 dark:bg-pink-950/25 text-pink-800 dark:text-pink-300 font-bold border-r border-slate-200/50 dark:border-slate-800/40 text-center">Remain (PACK)</th>
                           
                           {/* Store columns */}
@@ -1229,10 +1681,24 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {filteredAllOrders.map(j => {
+                        {visibleAllOrders.map(j => {
                           const m = getJobCardProcessMetrics(j, movements);
                           return (
                             <tr key={j.jobCardNo} className="border-b last:border-b-0 border-slate-200 dark:border-slate-850 hover:bg-slate-50/50 dark:hover:bg-slate-850/20 text-slate-700 dark:text-slate-300">
+                              <td className="py-3 px-3 text-center w-10 shrink-0">
+                                <input 
+                                  type="checkbox"
+                                  checked={selectedJobCardNos.includes(j.jobCardNo)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) {
+                                      setSelectedJobCardNos(prev => [...prev, j.jobCardNo]);
+                                    } else {
+                                      setSelectedJobCardNos(prev => prev.filter(no => no !== j.jobCardNo));
+                                    }
+                                  }}
+                                  className="rounded border-slate-300 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5 cursor-pointer accent-indigo-600"
+                                />
+                              </td>
                               <td className="py-3 px-3 font-mono font-bold text-indigo-500 whitespace-nowrap">{j.jobCardNo}</td>
                               <td className="py-3 px-3 font-semibold text-slate-850 dark:text-slate-100 whitespace-nowrap leading-tight">{j.partyName}</td>
                               <td className="py-2 px-3">
@@ -1286,7 +1752,17 @@ export default function App() {
                               
                               {/* Packing values */}
                               <td className="py-3 px-2 bg-pink-50/10 dark:bg-pink-950/10 font-mono font-semibold text-pink-700 dark:text-pink-400 text-center">{m.qtyReceivedAtPacking.toLocaleString()}</td>
-                              <td className="py-3 px-2 bg-pink-50/10 dark:bg-pink-950/10 font-mono text-pink-650 dark:text-pink-350 text-center border-x border-slate-200/30">{m.qtyRoutedToStore.toLocaleString()}</td>
+                              <td className="py-3 px-2 bg-pink-50/10 dark:bg-pink-950/10 font-mono text-pink-650 dark:text-pink-350 text-center border-l border-slate-200/30">{m.qtyRoutedToStore.toLocaleString()}</td>
+                              <td className="py-3 px-2 bg-pink-50/10 dark:bg-pink-950/10 font-mono text-pink-600 dark:text-pink-400 text-center border-x border-slate-200/30 text-[11px]" title={`${j.packingDetails?.pcsPerBagOrBox || 0} pcs per box`}>
+                                {j.packingDetails?.totalPcs ? (
+                                  <div className="flex flex-col line-tight">
+                                    <span className="font-bold">{j.packingDetails.totalPcs.toLocaleString()} pcs</span>
+                                    <span className="text-[9px] text-slate-400 font-sans">({j.packingDetails.pcsPerBagOrBox}/box)</span>
+                                  </div>
+                                ) : (
+                                  <span className="text-slate-400 italic font-sans text-[10px]">N/A</span>
+                                )}
+                              </td>
                               <td className="py-3 px-2 bg-pink-50/10 dark:bg-pink-950/10 font-mono text-pink-500 dark:text-pink-300 text-center border-r border-slate-200/30">{m.qtyRemainingAtPacking.toLocaleString()}</td>
                               
                               {/* Store values */}
@@ -1306,6 +1782,15 @@ export default function App() {
                                     className="text-[10.5px] font-bold text-amber-500 hover:bg-amber-500/10 px-2.5 py-1.5 rounded transition"
                                   >
                                     Details
+                                  </button>
+                                  <button
+                                    onClick={() => setQuickTransferJob(j)}
+                                    className="text-[10.5px] font-bold text-indigo-600 hover:bg-indigo-500/10 dark:text-indigo-400 dark:hover:bg-indigo-400/15 px-2 py-1.5 rounded transition flex items-center gap-1 disabled:opacity-30 disabled:hover:bg-transparent"
+                                    title="Quick Material Transfer Transit"
+                                    disabled={j.currentDepartment === 'Completed'}
+                                  >
+                                    <ArrowUpDown className="h-3 w-3" />
+                                    <span>Transfer</span>
                                   </button>
                                   {(currentUser?.role === 'admin' || currentUser?.department === 'Admin') && (
                                     <button
@@ -1339,6 +1824,16 @@ export default function App() {
                       </tbody>
                     </table>
                   )}
+                  {filteredAllOrders.length > 100 && (
+                    <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border-t border-slate-150 dark:border-slate-800 text-slate-500 dark:text-slate-400 text-[11px] flex flex-col sm:flex-row justify-between items-center gap-1.5 font-sans">
+                      <span>
+                        Showing first <strong>100</strong> active cards of <strong>{filteredAllOrders.length.toLocaleString()}</strong> matching items.
+                      </span>
+                      <span className="font-semibold text-indigo-500 font-mono text-[9px] uppercase tracking-wide bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-150 dark:border-indigo-900/40 animate-pulse">
+                        Virtualized Rendering Active
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Mobile View: Cards */}
@@ -1367,7 +1862,7 @@ export default function App() {
                       <p className="text-xs font-semibold text-slate-400 font-mono">No matching Job Cards found</p>
                     </div>
                   ) : (
-                    getSortedMobileOrders().map(j => {
+                    getSortedMobileOrders().slice(0, 100).map(j => {
                       const m = getJobCardProcessMetrics(j, movements);
                       const totalTransferred = movements
                         .filter(mov => mov.jobCardNo.toLowerCase() === j.jobCardNo.toLowerCase())
@@ -1378,7 +1873,19 @@ export default function App() {
                         <div key={j.jobCardNo} className="p-4 space-y-3">
                           {/* Card Header: Job Card No & Status */}
                           <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-1.5 font-mono text-xs">
+                            <div className="flex items-center gap-2 font-mono text-xs">
+                              <input 
+                                type="checkbox"
+                                checked={selectedJobCardNos.includes(j.jobCardNo)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedJobCardNos(prev => [...prev, j.jobCardNo]);
+                                  } else {
+                                    setSelectedJobCardNos(prev => prev.filter(no => no !== j.jobCardNo));
+                                  }
+                                }}
+                                className="rounded border-slate-350 dark:border-slate-700 text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5 cursor-pointer accent-indigo-600 shrink-0"
+                              />
                               <span className="font-bold text-indigo-500 bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded">
                                 {j.jobCardNo}
                               </span>
@@ -1435,64 +1942,82 @@ export default function App() {
                               </div>
                             </div>
                           </div>
-
                           {/* Actions */}
-                          <div className="flex items-center justify-between pt-1 border-t border-slate-100 dark:border-slate-800">
-                            <div>
-                              {pendingQty > 0 ? (
-                                <button
-                                  onClick={() => handleCreateSubJob(j)}
-                                  className="px-2 py-1 bg-amber-100 dark:bg-amber-900 text-amber-850 dark:text-amber-200 rounded text-[9px] font-extrabold uppercase hover:bg-amber-200 transition"
-                                >
-                                  Sub-Job
-                                </button>
-                              ) : (
-                                <span className="text-[9px] text-emerald-600 dark:text-emerald-450 font-bold uppercase">Fully Routed</span>
-                              )}
-                            </div>
-
-                            <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-slate-100 dark:border-slate-800">
+                            {pendingQty > 0 ? (
                               <button
-                                onClick={() => setSelectedJob(j)}
-                                className="text-[10px] font-extrabold text-amber-500 hover:bg-amber-500/10 px-2 py-1 rounded transition"
+                                onClick={() => handleCreateSubJob(j)}
+                                className="flex-1 min-h-[44px] px-3 bg-amber-50 dark:bg-amber-950/40 text-amber-850 dark:text-amber-300 border border-amber-200/50 rounded-xl text-xs font-bold uppercase tracking-wide hover:bg-amber-100 transition flex items-center justify-center gap-1 cursor-pointer"
                               >
-                                View Details
+                                Sub-Job
                               </button>
-                              {(currentUser?.role === 'admin' || currentUser?.department === 'Admin') && (
-                                <button
-                                  onClick={() => {
-                                    showConfirm(
-                                      "Delete Job Card",
-                                      `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible, and all related material transitions and notifications will be deleted!`,
-                                      async () => {
-                                        try {
-                                          await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
-                                          showToast(`Job Card ${j.jobCardNo} has been deleted successfully.`, "success");
-                                          refreshAllStates();
-                                        } catch (err: any) {
-                                          console.error("Failed to delete job card", err);
-                                          showToast(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
-                                        }
+                            ) : (
+                              <div className="flex-1 min-h-[44px] bg-emerald-50 dark:bg-emerald-950/20 text-emerald-800 dark:text-emerald-400 border border-emerald-150/30 rounded-xl text-xs font-bold uppercase tracking-wide flex items-center justify-center">
+                                Routed
+                              </div>
+                            )}
+
+                            <button
+                              onClick={() => setSelectedJob(j)}
+                              className="flex-1 min-h-[44px] px-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-100 rounded-xl text-xs font-bold transition flex items-center justify-center gap-1 cursor-pointer"
+                            >
+                              Details
+                            </button>
+
+                            <button
+                              onClick={() => setQuickTransferJob(j)}
+                              className="flex-1 min-h-[44px] px-3 bg-[#3B82F6] hover:bg-blue-600 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-30 disabled:hover:bg-[#3B82F6]"
+                              disabled={j.currentDepartment === 'Completed'}
+                            >
+                              <ArrowUpDown className="h-3.5 w-3.5" />
+                              <span>Transfer</span>
+                            </button>
+
+                            {(currentUser?.role === 'admin' || currentUser?.department === 'Admin') && (
+                              <button
+                                onClick={() => {
+                                  showConfirm(
+                                    "Delete Job Card",
+                                    `Are you sure you want to permanently delete Job Card ${j.jobCardNo}? This action is completely irreversible, and all related material transitions and notifications will be deleted!`,
+                                    async () => {
+                                      try {
+                                        await DBService.deleteJobCard(j.jobCardNo, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                                        showToast(`Job Card ${j.jobCardNo} has been deleted successfully.`, "success");
+                                        refreshAllStates();
+                                      } catch (err: any) {
+                                        console.error("Failed to delete job card", err);
+                                        showToast(`Failed to delete Job Card: ${err instanceof Error ? err.message : String(err)}`, "error");
                                       }
-                                    );
-                                  }}
-                                  className="p-1 px-1.5 rounded text-red-500 hover:bg-red-500/10 transition"
-                                  title="Admin: Delete Selected Job Card"
-                                >
-                                  <Trash2 className="h-3.5 w-3.5" />
-                                </button>
-                              )}
-                            </div>
+                                    }
+                                  );
+                                }}
+                                className="min-h-[44px] w-12 bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/40 dark:hover:bg-rose-950/60 text-rose-600 dark:text-rose-450 rounded-xl border border-rose-200/40 flex items-center justify-center transition cursor-pointer"
+                                title="Admin: Delete Selected Job Card"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            )}
                           </div>
                         </div>
                       );
                     })
                   )}
+                  {getSortedMobileOrders().length > 100 && (
+                    <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border-t border-slate-150 dark:border-slate-800 text-slate-500 dark:text-slate-400 text-[11px] flex flex-col sm:flex-row justify-between items-center gap-1.5 font-sans">
+                      <span>
+                        Showing first <strong>100</strong> active cards of <strong>{getSortedMobileOrders().length.toLocaleString()}</strong> matching items.
+                      </span>
+                      <span className="font-semibold text-indigo-500 font-mono text-[9px] uppercase tracking-wide bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-150 dark:border-indigo-900/40 animate-pulse">
+                        Virtualized Rendering Active
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
             </div>
-          )}
+          );
+          })()}
 
           {/* REAL TIME LOGS MOVEMENT LEDGER VIEW */}
           {activeTab === 'timeline-live' && (
@@ -1565,8 +2090,8 @@ export default function App() {
                         onChange={(e) => handleSelectJobByNo(e.target.value)}
                         className="w-full bg-slate-800 text-white text-xs py-2 px-3 pr-8 rounded border border-slate-700 font-mono cursor-pointer"
                       >
-                        <option value="">-- Select Active Job Card --</option>
-                        {jobCards.map(c => (
+                        <option value="">-- Select Active Job Card (Showing max 500) --</option>
+                        {jobCards.slice(0, 500).map(c => (
                           <option key={c.jobCardNo} value={c.jobCardNo}>
                             [{c.jobCardNo}] - {c.itemName}
                           </option>
@@ -1592,7 +2117,14 @@ export default function App() {
             <ReportView 
               jobCards={jobCards}
               movements={movements}
+              onCreateMovement={handleCreateMovement}
+              currentUser={currentUser}
             />
+          )}
+
+          {/* USER MANUAL & OPERATIONS GUIDE */}
+          {activeTab === 'user-guide' && currentUser && (
+            <UserGuide currentUser={currentUser} />
           )}
 
           {/* ADMINISTRATOR CONSOLE PORTAL */}
@@ -1614,10 +2146,134 @@ export default function App() {
               onOpenSheetsModal={() => setShowSheetsModal(true)}
               onDisconnectSheets={handleDisconnectGoogleSheets}
               onOpenSheetsInspector={() => setShowSheetsInspector(true)}
+              onSetJobCards={setJobCards}
+              onUpdateMovement={handleUpdateMovement}
+              onDeleteMovement={handleDeleteMovement}
             />
           )}
 
         </div>
+
+        {/* PERSISTENT APP LEDGER FOOTER / STATUS BAR */}
+        <footer className="bg-slate-900 border-t border-slate-800 px-4 py-2.5 flex items-center justify-between text-xs text-slate-300 shrink-0 select-none print:hidden z-10">
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5 font-semibold text-slate-400">
+              <Database className="h-3.5 w-3.5 text-[#3B82F6]" />
+              <span>Mfg Ledger: v2.5</span>
+            </span>
+            <span className="h-3 w-[1px] bg-slate-700 hidden sm:inline" />
+            <div className="hidden sm:flex items-center gap-1.5">
+              <span className={`h-1.5 w-1.5 rounded-full ${isOnline ? 'bg-emerald-500' : 'bg-amber-500 animate-pulse'}`} />
+              <span className="text-slate-400 font-mono text-[11px]">
+                {isOnline ? 'Cloud Synced' : 'Offline Mode Active'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-3">
+            {/* Sync Queue Visual Indicator */}
+            {syncQueue.length > 0 ? (
+              <button
+                onClick={() => setShowSyncDrawer(true)}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[11px] font-semibold transition-all duration-200 cursor-pointer ${
+                  syncQueue.some(item => item.status === 'failed')
+                    ? 'bg-rose-950/45 hover:bg-rose-950/60 text-rose-350 border-rose-900/50'
+                    : 'bg-amber-950/35 hover:bg-amber-950/50 text-amber-300 border-amber-900/50'
+                }`}
+              >
+                <RefreshCw className={`h-3 w-3 ${syncQueue.some(item => item.status === 'pending') ? 'animate-spin' : ''}`} />
+                <span>
+                  {syncQueue.filter(item => item.status === 'pending' || item.status === 'failed').length} Pending Syncs
+                </span>
+                <ChevronUp className="h-3 w-3 ml-0.5" />
+              </button>
+            ) : (
+              <span className="text-slate-500 flex items-center gap-1 text-[11px] font-medium font-sans">
+                ✓ Sync Queue Empty
+              </span>
+            )}
+
+            {syncQueue.length > 0 && (
+              <button
+                onClick={handleManualRetryAll}
+                className="px-2.5 py-1.5 rounded-lg bg-[#3B82F6]/15 hover:bg-[#3B82F6]/25 border border-[#3B82F6]/30 text-[#3B82F6] hover:text-[#60A5FA] text-[10.5px] font-bold transition-all cursor-pointer"
+              >
+                Sync All
+              </button>
+            )}
+          </div>
+        </footer>
+
+        {/* PERSISTENT MOBILE BOTTOM NAVIGATION BAR */}
+        <nav className="fixed bottom-0 left-0 right-0 h-16 bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 flex items-center justify-around z-40 lg:hidden shadow-lg select-none print:hidden px-2">
+          <button
+            onClick={() => {
+              setActiveTab('dashboard');
+              setSelectedJobCardNos([]);
+            }}
+            className={`flex flex-col items-center justify-center gap-1 w-14 h-12 rounded-xl transition cursor-pointer ${
+              activeTab === 'dashboard'
+                ? 'text-[#3B82F6]'
+                : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <Factory className="h-5 w-5" />
+            <span className="text-[10px] font-bold font-sans tracking-wide">Floor</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab('all-orders');
+              setSelectedJobCardNos([]);
+            }}
+            className={`flex flex-col items-center justify-center gap-1 w-14 h-12 rounded-xl transition cursor-pointer ${
+              activeTab === 'all-orders'
+                ? 'text-[#3B82F6]'
+                : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <FileText className="h-5 w-5" />
+            <span className="text-[10px] font-bold font-sans tracking-wide">Cards</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab('timeline-live');
+              setSelectedJobCardNos([]);
+            }}
+            className={`flex flex-col items-center justify-center gap-1 w-14 h-12 rounded-xl transition cursor-pointer ${
+              activeTab === 'timeline-live'
+                ? 'text-[#3B82F6]'
+                : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <Activity className="h-5 w-5" />
+            <span className="text-[10px] font-bold font-sans tracking-wide">Live</span>
+          </button>
+
+          <button
+            onClick={() => {
+              setActiveTab('forecast');
+              setSelectedJobCardNos([]);
+            }}
+            className={`flex flex-col items-center justify-center gap-1 w-14 h-12 rounded-xl transition cursor-pointer ${
+              activeTab === 'forecast'
+                ? 'text-[#3B82F6]'
+                : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
+            }`}
+          >
+            <Brain className="h-5 w-5" />
+            <span className="text-[10px] font-bold font-sans tracking-wide">AI</span>
+          </button>
+
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="flex flex-col items-center justify-center gap-1 w-14 h-12 rounded-xl text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 transition cursor-pointer"
+          >
+            <Menu className="h-5 w-5" />
+            <span className="text-[10px] font-bold font-sans tracking-wide">Menu</span>
+          </button>
+        </nav>
       </main>
 
       {/* ======================================================== */}
@@ -1646,6 +2302,35 @@ export default function App() {
           onDeleteAttachment={handleDeleteAttachment}
         />
       )}
+
+      {/* Quick Material Transit Transfer Modal */}
+      <QuickTransferModal
+        isOpen={!!quickTransferJob}
+        onClose={() => setQuickTransferJob(null)}
+        jobCard={quickTransferJob}
+        movements={movements}
+        currentUser={currentUser}
+        onSubmit={handleCreateMovement}
+      />
+
+      {/* Bulk Material Transit Transfer Modal */}
+      <BulkTransferModal
+        isOpen={showBulkTransferModal}
+        onClose={() => setShowBulkTransferModal(false)}
+        selectedJobCards={jobCards.filter(j => selectedJobCardNos.includes(j.jobCardNo))}
+        movements={movements}
+        currentUser={currentUser}
+        onSubmit={handleBulkTransfer}
+      />
+
+      {/* Bulk Manifest Printing Modal */}
+      <BulkPrintManifestModal
+        isOpen={showBulkPrintModal}
+        onClose={() => setShowBulkPrintModal(false)}
+        selectedJobCards={jobCards.filter(j => selectedJobCardNos.includes(j.jobCardNo))}
+        movements={movements}
+        currentUser={currentUser}
+      />
 
       {/* Google Sheets Sync Setup Modal */}
       {showSheetsModal && (
@@ -1722,6 +2407,16 @@ export default function App() {
                     <FileSpreadsheet className="h-4 w-4" />
                     <span>Link via Google Account</span>
                   </button>
+                  {showEmulatedSheetsBtn && (
+                    <button
+                      onClick={handleConnectEmulatedSheets}
+                      className="w-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-emerald-600 dark:text-emerald-400 font-bold py-2 px-4 rounded-lg flex items-center justify-center gap-2 shadow-sm transition uppercase tracking-wider text-[11px] font-mono cursor-pointer border border-slate-200 dark:border-slate-700 animate-pulse"
+                      id="btn_emulate_sheets"
+                    >
+                      <Layers className="h-4 w-4 text-[#107C41]" />
+                      <span>Use Sandbox Emulation Fallback</span>
+                    </button>
+                  )}
                   <p className="text-[9.5px] text-center text-slate-450 font-light pt-1">
                     Secure OAuth token integration. Google Sheets permission is sandbox restricted to spreadsheets created by this app.
                   </p>
@@ -1822,6 +2517,158 @@ export default function App() {
               >
                 {confirmDialog.confirmText || 'Confirm'}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Offline Sync Queue Details Drawer Modal */}
+      {showSyncDrawer && (
+        <div className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs flex items-end justify-center p-0 z-50 animate-fade-in print:hidden" onClick={() => setShowSyncDrawer(false)}>
+          <div 
+            className="bg-white dark:bg-slate-905 border-t border-slate-200 dark:border-slate-800 rounded-t-2xl w-full max-w-4xl p-6 shadow-2xl relative max-h-[85vh] flex flex-col animate-slide-up"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Header */}
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100 dark:border-slate-800 shrink-0 select-none">
+              <div className="flex items-center gap-2">
+                <div className="p-1.5 bg-blue-50 dark:bg-blue-950/50 rounded-lg text-blue-600 dark:text-blue-400">
+                  <Database className="h-5 w-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-slate-900 dark:text-slate-100">
+                    Offline Sync Queue Ledger
+                  </h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Traceability transactions captured offline in your secure browser persistent cache.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {syncQueue.some(item => item.status === 'synced') && (
+                  <button
+                    onClick={() => {
+                      DBService.clearSyncQueue();
+                      showToast("Cleared synced transactions from queue.", "info");
+                    }}
+                    className="px-3 py-1.5 border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 rounded-lg text-xs font-semibold transition cursor-pointer"
+                  >
+                    Clear Synced
+                  </button>
+                )}
+                <button
+                  onClick={handleManualRetryAll}
+                  className="px-3.5 py-1.5 bg-[#3B82F6] hover:bg-[#2563EB] text-white rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm hover:shadow-md"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  <span>Sync All</span>
+                </button>
+                <button
+                  onClick={() => setShowSyncDrawer(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg transition"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* List */}
+            <div className="flex-1 overflow-y-auto py-4 space-y-3 min-h-0">
+              {syncQueue.length === 0 ? (
+                <div className="text-center py-12">
+                  <span className="text-4xl">✓</span>
+                  <h4 className="text-slate-700 dark:text-slate-300 font-bold mt-2 text-sm">All Transactions Synced</h4>
+                  <p className="text-xs text-slate-400 dark:text-slate-500 mt-1 max-w-sm mx-auto">
+                    There are no pending offline mutations. All your data is safely backed up to the live Cloud Firestore database.
+                  </p>
+                </div>
+              ) : (
+                [...syncQueue].reverse().map((item) => (
+                  <div 
+                    key={item.id}
+                    className={`p-4 rounded-xl border flex flex-col gap-2.5 transition-all ${
+                      item.status === 'synced'
+                        ? 'bg-emerald-50/25 dark:bg-emerald-950/10 border-emerald-100 dark:border-emerald-950/30'
+                        : item.status === 'failed'
+                        ? 'bg-rose-50/25 dark:bg-rose-950/10 border-rose-150 dark:border-rose-950/30'
+                        : 'bg-slate-50/50 dark:bg-slate-900/30 border-slate-150 dark:border-slate-850'
+                    }`}
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      {/* Left: Metadata */}
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold tracking-wider uppercase ${
+                            item.status === 'synced'
+                              ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-450'
+                              : item.status === 'failed'
+                              ? 'bg-rose-100 text-rose-800 dark:bg-rose-950/60 dark:text-rose-450'
+                              : 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-450'
+                          }`}>
+                            {item.action}
+                          </span>
+                          <span className="text-[10px] text-slate-400 dark:text-slate-500 font-mono">
+                            {new Date(item.timestamp).toLocaleString()}
+                          </span>
+                        </div>
+                        <p className="text-xs font-semibold text-slate-800 dark:text-slate-200">
+                          {item.description}
+                        </p>
+                      </div>
+
+                      {/* Right: Actions and Status badge */}
+                      <div className="flex items-center gap-3 shrink-0 self-end sm:self-center">
+                        <span className={`text-[10.5px] font-bold flex items-center gap-1 ${
+                          item.status === 'synced'
+                            ? 'text-emerald-600 dark:text-emerald-400'
+                            : item.status === 'failed'
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-amber-600 dark:text-amber-400'
+                        }`}>
+                          {item.status === 'synced' ? (
+                            <>
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                              <span>Synced</span>
+                            </>
+                          ) : item.status === 'failed' ? (
+                            <>
+                              <span className="h-1.5 w-1.5 rounded-full bg-rose-500 animate-pulse" />
+                              <span>Sync Failed</span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+                              <span>Offline Queued</span>
+                            </>
+                          )}
+                        </span>
+
+                        {item.status !== 'synced' && (
+                          <button
+                            onClick={() => handleManualRetryItem(item.id, item.action)}
+                            disabled={retryingIds[item.id]}
+                            className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 text-white dark:text-slate-200 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                          >
+                            {retryingIds[item.id] ? (
+                              <RefreshCw className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <RefreshCw className="h-3 w-3" />
+                            )}
+                            <span>Retry</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Error trace box if failed */}
+                    {item.status === 'failed' && item.error && (
+                      <div className="p-2 bg-rose-50/60 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-900/30 rounded-lg text-[10.5px] text-rose-700 dark:text-rose-300 font-mono mt-0.5 leading-relaxed break-all">
+                        <span className="font-bold">Error Exception:</span> {item.error}
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>

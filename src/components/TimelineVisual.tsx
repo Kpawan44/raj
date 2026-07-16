@@ -43,7 +43,7 @@ export default function TimelineVisual({ jobCard, movements }: TimelineVisualPro
     }
 
     // Is it Heat Treatment and marked as not required?
-    if (phase === 'Heat Treatment' && !jobCard.heatTreatmentRequired) {
+    if (phase === 'Heat Treatment' && !jobCard.heatTreatmentRequired && jobCard.processType !== 'Purchase') {
       return {
         completed: true,
         skipped: true,
@@ -57,6 +57,36 @@ export default function TimelineVisual({ jobCard, movements }: TimelineVisualPro
     // Find the movement that ended inside this department
     const incomingMov = movements.find(m => m.toDepartment === phase && m.accepted);
     const pendingMov = movements.find(m => m.toDepartment === phase && !m.accepted);
+
+    const deptOrder = ['Production', 'Heat Treatment', 'Plating', 'Packing', 'Store', 'Dispatch', 'Completed'];
+
+    // Dynamic bypass logic for Purchase process
+    if (jobCard.processType === 'Purchase') {
+      if (phase === 'Production') {
+        return {
+          completed: true,
+          skipped: true,
+          operator: 'System',
+          date: null,
+          info: 'Bypassed (Purchased)',
+          type: 'skipped'
+        };
+      }
+      
+      const currentDeptIdx = deptOrder.indexOf(jobCard.completed ? 'Completed' : jobCard.currentDepartment);
+      const phaseIdx = deptOrder.indexOf(phase);
+      
+      if (phaseIdx !== -1 && currentDeptIdx > phaseIdx && !incomingMov && !pendingMov) {
+        return {
+          completed: true,
+          skipped: true,
+          operator: 'System',
+          date: null,
+          info: 'Bypassed (Direct)',
+          type: 'skipped'
+        };
+      }
+    }
 
     if (incomingMov) {
       let extraInfo = '';

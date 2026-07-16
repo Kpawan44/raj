@@ -486,6 +486,12 @@ export default function JobCardDetailsModal({
                      <div className="mt-1 space-y-1 font-mono text-[11px]">
                        <p>• Packed Weight: {jobCard.packingDetails.packedQty || jobCard.currentQty} KG</p>
                        <p>• Box Count: {jobCard.packingDetails.boxCount || 'N/A'}</p>
+                       {jobCard.packingDetails.pcsPerBagOrBox !== undefined && (
+                         <p>• Pcs in Bag/Box: {jobCard.packingDetails.pcsPerBagOrBox} pcs</p>
+                       )}
+                       {jobCard.packingDetails.totalPcs !== undefined && (
+                         <p>• Total Pieces (Pcs): {jobCard.packingDetails.totalPcs.toLocaleString()} pcs</p>
+                       )}
                        <p>• Style: {jobCard.packingDetails.packingType || 'Wooden Pallets'}</p>
                        {jobCard.packingDetails.qtyReceivedFromPlating !== undefined && (
                          <p>• Qty Received from Plating: {jobCard.packingDetails.qtyReceivedFromPlating} KG</p>
@@ -509,6 +515,12 @@ export default function JobCardDetailsModal({
                      <div className="mt-1 space-y-1 font-mono text-[11px]">
                        <p>• Verified Inventory: {jobCard.storeDetails.verifiedQty || jobCard.currentQty} KG</p>
                        <p>• Location Bin Tag: {jobCard.storeDetails.locationBin || 'BIN-A3'}</p>
+                       {jobCard.storeDetails.pcsPerBagOrBox !== undefined && (
+                         <p>• Pcs in Bag/Box: {jobCard.storeDetails.pcsPerBagOrBox} pcs</p>
+                       )}
+                       {jobCard.storeDetails.totalPcs !== undefined && (
+                         <p>• Total Pieces (Pcs): {jobCard.storeDetails.totalPcs.toLocaleString()} pcs</p>
+                       )}
                        {jobCard.storeDetails.qtyReceivedFromPacking !== undefined && (
                          <p>• Qty Received from Packing: {jobCard.storeDetails.qtyReceivedFromPacking} KG</p>
                        )}

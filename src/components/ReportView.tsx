@@ -19,12 +19,14 @@ import {
   ExternalLink,
   RefreshCw
 } from 'lucide-react';
-import { JobCard, MaterialMovement, Department } from '../types';
+import { JobCard, MaterialMovement, Department, UserProfile } from '../types';
 import { getJobCardProcessMetrics } from '../lib/metrics';
 
 interface ReportViewProps {
   jobCards: JobCard[];
   movements: MaterialMovement[];
+  onCreateMovement?: (mov: any) => Promise<void>;
+  currentUser?: UserProfile | null;
 }
 
 type ReportType = 
@@ -33,6 +35,7 @@ type ReportType =
   | 'plating'
   | 'packing'
   | 'store'
+  | 'stock_summary'
   | 'dispatch'
   | 'pending'
   | 'completed'
@@ -42,11 +45,17 @@ type ReportType =
   | 'rejection_by_dept'
   | 'email_triggers';
 
-export default function ReportView({ jobCards, movements }: ReportViewProps) {
+export default function ReportView({ jobCards, movements, onCreateMovement, currentUser }: ReportViewProps) {
   const [activeReport, setActiveReport] = useState<ReportType>('production');
   const [searchTerm, setSearchTerm] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
+
+  // Dispatch Issue Request Modal States
+  const [isOpenRequestModal, setIsOpenRequestModal] = useState(false);
+  const [selectedStoreRow, setSelectedStoreRow] = useState<any | null>(null);
+  const [requestedQty, setRequestedQty] = useState<number>(0);
+  const [remarksVal, setRemarksVal] = useState<string>('');
 
   // Automated Email Trigger States
   const [outboxHistory, setOutboxHistory] = useState<any[]>([]);
@@ -126,6 +135,7 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
     { id: 'plating', label: 'Surfacing & Plating Report', desc: "Thickness measurements and coating quality" },
     { id: 'packing', label: 'Packaging Weights Report', desc: "Box specifications and total count packed" },
     { id: 'store', label: 'Store / Warehousing Report', desc: "Verified inventory placement and bin location storage" },
+    { id: 'stock_summary', label: 'Stock Summary (Item-wise)', desc: "Aggregate current in-stock weights, pieces count and box count grouped by item name" },
     { id: 'dispatch', label: 'Dispatch Shipment Report', desc: "Invoiced amounts and vehicle tracking records" },
     { id: 'pending', label: 'Active Outstanding Queue', desc: "Incomplete orders currently on work floors" },
     { id: 'completed', label: 'Archived Completed Orders', desc: "Perfect run items fully shipped out" },
@@ -259,18 +269,148 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
       case 'store':
         baseData = jobCards.map(c => {
           const m = getJobCardProcessMetrics(c, movements);
+          
+          const storeMovements = movements.filter(mov => 
+            mov.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && 
+            mov.toDepartment === 'Store' && 
+            mov.accepted
+          );
+          const latestStoreMov = storeMovements.reduce<MaterialMovement | null>((latest, current) => {
+            if (!latest) return current;
+            return new Date(current.transferDate) > new Date(latest.transferDate) ? current : latest;
+          }, null);
+
           return {
             jobCardNo: c.jobCardNo,
             partyName: c.partyName,
             itemName: c.itemName,
-            storeLocation: c.storeDetails?.locationBin || 'Pending placement',
+            allottedLocation: latestStoreMov?.allottedLocation || c.storeDetails?.locationBin || 'Pending placement',
+            rackNo: latestStoreMov?.rackNo || 'N/A',
             receivedAtStoreKg: m.qtyReceivedAtStore,
+            pcsReceivedFromPacking: c.packingDetails?.totalPcs !== undefined ? `${c.packingDetails.totalPcs.toLocaleString()} pcs` : 'N/A',
             qtyDispatchedKg: m.qtyDispatched,
             qtyInStockKg: m.qtyRemainingInStock,
             date: c.createdAt
           };
         });
         break;
+      case 'stock_summary': {
+        let cardList = [...jobCards];
+        if (searchTerm) {
+          const match = searchTerm.toLowerCase();
+          cardList = cardList.filter(c =>
+            c.jobCardNo.toLowerCase().includes(match) ||
+            c.partyName.toLowerCase().includes(match) ||
+            c.itemName.toLowerCase().includes(match) ||
+            (c.itemCode && c.itemCode.toLowerCase().includes(match))
+          );
+        }
+        if (startDate) {
+          const start = new Date(startDate);
+          cardList = cardList.filter(c => new Date(c.createdAt) >= start);
+        }
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+          cardList = cardList.filter(c => new Date(c.createdAt) <= end);
+        }
+
+        const stockMap: Record<string, {
+          itemName: string;
+          itemCode: string;
+          totalReceivedKg: number;
+          totalDispatchedKg: number;
+          totalInStockKg: number;
+          totalBoxesInStock: number;
+          totalPiecesInStock: number;
+          locationBins: string;
+          date: string;
+        }> = {};
+
+        cardList.forEach(c => {
+          const m = getJobCardProcessMetrics(c, movements);
+          const key = c.itemName || 'UNKNOWN';
+          const itemCode = c.itemCode || 'N/A';
+          const bin = c.storeDetails?.locationBin;
+
+          const totalPcs = c.packingDetails?.totalPcs || 0;
+          const boxCount = c.packingDetails?.boxCount || 0;
+          const receivedStore = m.qtyReceivedAtStore || 0;
+          const remainingStock = m.qtyRemainingInStock || 0;
+
+          let fraction = 0;
+          if (receivedStore > 0) {
+            fraction = remainingStock / receivedStore;
+          } else if (remainingStock > 0) {
+            fraction = 1;
+          }
+
+          const pcsInStock = fraction * totalPcs;
+          const boxesInStock = fraction * boxCount;
+
+          if (!stockMap[key]) {
+            stockMap[key] = {
+              itemName: key,
+              itemCode: itemCode,
+              totalReceivedKg: 0,
+              totalDispatchedKg: 0,
+              totalInStockKg: 0,
+              totalBoxesInStock: 0,
+              totalPiecesInStock: 0,
+              locationBins: '',
+              date: c.createdAt
+            };
+          }
+
+          stockMap[key].totalReceivedKg += receivedStore;
+          stockMap[key].totalDispatchedKg += m.qtyDispatched;
+          stockMap[key].totalInStockKg += m.qtyRemainingInStock;
+          stockMap[key].totalBoxesInStock += boxesInStock;
+          stockMap[key].totalPiecesInStock += pcsInStock;
+
+          const storeMovements = movements.filter(mov => 
+            mov.jobCardNo.toLowerCase() === c.jobCardNo.toLowerCase() && 
+            mov.toDepartment === 'Store' && 
+            mov.accepted
+          );
+          
+          const binsList = storeMovements.map(mov => {
+            if (mov.allottedLocation) {
+              return mov.allottedLocation + (mov.rackNo ? ` [Rack: ${mov.rackNo}]` : '');
+            }
+            return '';
+          }).filter(b => b !== '');
+
+          if (bin && bin !== 'Pending placement' && !binsList.includes(bin)) {
+            binsList.push(bin);
+          }
+
+          binsList.forEach(b => {
+            const currentBins = stockMap[key].locationBins ? stockMap[key].locationBins.split(', ') : [];
+            if (!currentBins.includes(b)) {
+              currentBins.push(b);
+              stockMap[key].locationBins = currentBins.join(', ');
+            }
+          });
+
+          if (new Date(c.createdAt) > new Date(stockMap[key].date)) {
+            stockMap[key].date = c.createdAt;
+          }
+        });
+
+        baseData = Object.values(stockMap).map(item => ({
+          itemName: item.itemName,
+          itemCode: item.itemCode,
+          totalReceivedKg: Math.round(item.totalReceivedKg * 10) / 10,
+          totalDispatchedKg: Math.round(item.totalDispatchedKg * 10) / 10,
+          totalInStockKg: Math.round(item.totalInStockKg * 10) / 10,
+          totalBoxesInStock: Math.round(item.totalBoxesInStock * 10) / 10,
+          totalPiecesInStock: Math.round(item.totalPiecesInStock),
+          locationBins: item.locationBins || 'Pending placement',
+          date: item.date
+        }));
+        break;
+      }
       case 'dispatch':
         baseData = jobCards
           .filter(c => c.completed || c.dispatchDetails)
@@ -342,6 +482,8 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
             quantity: m.quantity,
             transferBy: m.transferBy,
             transferDate: m.transferDate,
+            allottedLocation: m.allottedLocation || 'N/A',
+            rackNo: m.rackNo || 'N/A',
             status: m.accepted ? 'Accepted' : 'Pending'
           };
         });
@@ -415,7 +557,7 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
       }
     }
 
-    if (activeReport === 'rejection_by_dept') {
+    if (activeReport === 'rejection_by_dept' || activeReport === 'stock_summary') {
       return baseData;
     }
 
@@ -1099,6 +1241,11 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
                         {h.replace(/([A-Z])/g, ' $1').trim()}
                       </th>
                     ))}
+                    {activeReport === 'store' && (
+                      <th className="py-3.5 px-4 font-mono font-bold text-indigo-600 dark:text-indigo-400">
+                        Dispatch Request
+                      </th>
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -1119,12 +1266,51 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
                           displayVal = new Date(val).toLocaleDateString([], {month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit'});
                         }
 
+                        // Determine column keys
+                        const colKey = Object.keys(row)[valIdx];
+                        const isJobCard = colKey === 'jobCardNo';
+                        const isItemName = colKey === 'itemName';
+                        const isBulkItem = isItemName && (row.qtyInStockKg >= 500 || String(val).toLowerCase().includes('bulk'));
+
                         return (
                           <td key={valIdx} className="py-3 px-4 font-mono text-slate-700 dark:text-slate-300">
-                            {displayVal}
+                            {isJobCard ? (
+                              <span className="font-bold text-slate-900 dark:text-white px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700">
+                                {displayVal}
+                              </span>
+                            ) : isItemName ? (
+                              <div className="flex items-center gap-1.5 font-sans font-medium text-slate-900 dark:text-white">
+                                <span>{displayVal}</span>
+                                {isBulkItem && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-extrabold bg-amber-50 dark:bg-amber-950/40 text-amber-650 dark:text-amber-450 border border-amber-200/50 dark:border-amber-900/30 font-sans uppercase tracking-wider">
+                                    Bulk Item 📦
+                                  </span>
+                                )}
+                              </div>
+                            ) : (
+                              displayVal
+                            )}
                           </td>
                         );
                       })}
+                      {activeReport === 'store' && (
+                        <td className="py-3 px-4">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedStoreRow(row);
+                              setRequestedQty(row.qtyInStockKg || 0);
+                              setRemarksVal(`Bulk material issue request for ${row.itemName} (${row.jobCardNo})`);
+                              setIsOpenRequestModal(true);
+                            }}
+                            disabled={!row.qtyInStockKg || row.qtyInStockKg <= 0}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold font-sans text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:pointer-events-none shadow-sm transition-all hover:scale-[1.02] active:scale-[0.98] cursor-pointer"
+                          >
+                            <Send className="h-3 w-3" />
+                            <span>Request Issue</span>
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -1139,6 +1325,136 @@ export default function ReportView({ jobCards, movements }: ReportViewProps) {
               <span>Ref: Site-1 Operations</span>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Dispatch Issue Request Modal */}
+      {isOpenRequestModal && selectedStoreRow && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 overflow-y-auto animate-fade-in">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl max-w-md w-full shadow-xl border border-slate-200 dark:border-slate-800 overflow-hidden font-sans">
+            <div className="p-5 border-b border-slate-150 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-950/30 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">📦</span>
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-800 dark:text-white">
+                    Request Dispatch Issue
+                  </h3>
+                  <p className="text-[10px] text-slate-400 uppercase tracking-wider font-mono">
+                    Store Report Workflow
+                  </p>
+                </div>
+              </div>
+              <button 
+                type="button"
+                onClick={() => setIsOpenRequestModal(false)}
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-250 text-xl font-bold cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3 bg-slate-50 dark:bg-slate-950 p-3 rounded-xl border border-slate-150 dark:border-slate-850 text-xs">
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Job Card No</span>
+                  <span className="font-mono font-bold text-slate-800 dark:text-white">{selectedStoreRow.jobCardNo}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Party Name</span>
+                  <span className="font-semibold text-slate-800 dark:text-white truncate block">{selectedStoreRow.partyName}</span>
+                </div>
+                <div className="col-span-2">
+                  <span className="text-slate-400 block text-[10px]">Item Description</span>
+                  <span className="font-semibold text-slate-800 dark:text-white">{selectedStoreRow.itemName}</span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Available In Store</span>
+                  <span className="font-bold text-indigo-600 dark:text-indigo-400 font-mono">
+                    {(selectedStoreRow.qtyInStockKg || 0).toLocaleString()} KG
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 block text-[10px]">Allotted Bin</span>
+                  <span className="font-semibold text-slate-800 dark:text-white font-mono">{selectedStoreRow.allottedLocation}</span>
+                </div>
+              </div>
+
+              {/* Form Input */}
+              <div className="space-y-1.5">
+                <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                  Requested Issue Quantity (KG)
+                </label>
+                <div className="relative">
+                  <input
+                    type="number"
+                    step="any"
+                    min="0.1"
+                    max={selectedStoreRow.qtyInStockKg}
+                    value={requestedQty}
+                    onChange={e => setRequestedQty(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-250 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-800 dark:text-white pr-12 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+                  />
+                  <span className="absolute right-3.5 top-2.5 text-xs font-bold text-slate-400">KG</span>
+                </div>
+                {requestedQty > (selectedStoreRow.qtyInStockKg || 0) && (
+                  <p className="text-[10px] text-rose-500 font-medium">
+                    ⚠️ Cannot request more than available stock ({(selectedStoreRow.qtyInStockKg || 0).toLocaleString()} KG).
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                  Remarks / Instructions
+                </label>
+                <textarea
+                  rows={2}
+                  value={remarksVal}
+                  onChange={e => setRemarksVal(e.target.value)}
+                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-slate-800 dark:text-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all placeholder:text-slate-400 resize-none"
+                  placeholder="Add any specific instructions for the storekeeper..."
+                />
+              </div>
+            </div>
+
+            <div className="p-5 border-t border-slate-150 dark:border-slate-800 bg-slate-50/30 dark:bg-slate-950/10 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setIsOpenRequestModal(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={requestedQty <= 0 || requestedQty > (selectedStoreRow.qtyInStockKg || 0)}
+                onClick={async () => {
+                  if (requestedQty <= 0 || requestedQty > (selectedStoreRow.qtyInStockKg || 0)) return;
+                  try {
+                    if (onCreateMovement) {
+                      await onCreateMovement({
+                        jobCardNo: selectedStoreRow.jobCardNo,
+                        fromDepartment: 'Store',
+                        toDepartment: 'Dispatch',
+                        quantity: selectedStoreRow.qtyInStockKg || 0,
+                        isIssueRequest: true,
+                        requestedUnit: 'KG',
+                        requestedQty: requestedQty,
+                        remarks: remarksVal || `Dispatch requested issue in KG`
+                      });
+                      setIsOpenRequestModal(false);
+                    }
+                  } catch (err) {
+                    console.error("Failed to create issue request", err);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:pointer-events-none transition flex items-center gap-1.5 shadow-md shadow-indigo-600/10 cursor-pointer"
+              >
+                <Send className="h-3.5 w-3.5" />
+                <span>Submit Issue Request</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

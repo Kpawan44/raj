@@ -199,7 +199,7 @@ export default function GoogleSheetViewer({
                               <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-50 dark:bg-slate-800 text-slate-500 dark:text-slate-400 font-sans border border-slate-150 dark:border-slate-700/50">
                                 {String(cell)}
                               </span>
-                            ) : String(cell).startsWith('JC-') || String(cell).startsWith('MOV-') ? (
+                            ) : String(cell).startsWith('JC-') || String(cell).startsWith('PUR-') || String(cell).startsWith('MOV-') ? (
                               <span className="font-bold text-slate-850 dark:text-white">{String(cell)}</span>
                             ) : (
                               String(cell)

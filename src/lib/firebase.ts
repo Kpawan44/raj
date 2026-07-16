@@ -20,7 +20,7 @@ import {
   limit 
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus } from '../types';
+import { UserProfile, JobCard, MaterialMovement, AppNotification, AuditLog, Department, CompanyConfig, JobCardStatus, SavedItem, SyncQueueItem, SyncQueueOperation } from '../types';
 import { 
   logJobCardToSheets, 
   logDepartmentUpdateToSheets, 
@@ -103,6 +103,7 @@ if (!isPlaceholder) {
     const dbId = (firebaseConfig as any).firestoreDatabaseId || '(default)';
     try {
       dbInstance = initializeFirestore(app, {
+        experimentalForceLongPolling: true,
         localCache: persistentLocalCache({
           tabManager: persistentMultipleTabManager()
         })
@@ -111,7 +112,7 @@ if (!isPlaceholder) {
     } catch (cacheError) {
       console.warn(`Failed to initialize Firestore persistent cache, using fallback initializeFirestore for database ${dbId}:`, cacheError);
       try {
-        dbInstance = initializeFirestore(app, {}, dbId);
+        dbInstance = initializeFirestore(app, { experimentalForceLongPolling: true }, dbId);
       } catch (fallbackError) {
         console.error("Firestore initialization fallback failed completely:", fallbackError);
         dbInstance = getFirestore(app, dbId);
@@ -205,6 +206,27 @@ const defaultUsers: UserProfile[] = [
     department: 'Store',
     role: 'staff',
     active: true,
+    createdAt: new Date().toISOString()
+  }
+];
+
+const defaultSavedItems: SavedItem[] = [
+  {
+    id: 'item-1',
+    itemName: 'Grade 8 High-Tensile Bolt M12',
+    itemCode: 'BOLT-M12-G8',
+    createdAt: new Date().toISOString()
+  },
+  {
+    id: 'item-2',
+    itemName: 'Engine Valve Gear Shaft',
+    itemCode: 'SHAFT-EVG-102',
+    createdAt: new Date().toISOString()
+  },
+  {
+    id: 'item-3',
+    itemName: 'Industrial Galvanized Washer',
+    itemCode: 'WASH-GALV-50',
     createdAt: new Date().toISOString()
   }
 ];
@@ -447,6 +469,15 @@ export class DBService {
           }
         }
 
+        // 5.5. Saved Items
+        const itemsSnap = await getDocs(collection(db, 'mfr_items'));
+        if (itemsSnap.empty) {
+          console.log("One-time seed: mfr_items");
+          for (const item of defaultSavedItems) {
+            await setDoc(doc(db, 'mfr_items', item.id), item);
+          }
+        }
+
         // 6. Global Company Config
         const globalRef = doc(db, 'mfr_company_config', 'global');
         const globalSnap = await getDoc(globalRef);
@@ -558,11 +589,6 @@ export class DBService {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_users'));
-        if (querySnapshot.empty) {
-          console.warn("Firestore returned empty users collection. Pre-populating local storage cache with defaultUsers.");
-          setLocalStorageItem('mfr_users', defaultUsers);
-          return defaultUsers;
-        }
         const usersList: UserProfile[] = [];
         querySnapshot.forEach((docSnap) => {
           usersList.push(docSnap.data() as UserProfile);
@@ -578,6 +604,16 @@ export class DBService {
   static async saveUser(user: UserProfile): Promise<void> {
     // 1. Update Local Storage offline cache first
     const list = await this.getUsers();
+
+    // Enforce Only One Admin For One Company
+    const isNewOrUpdatedAdmin = user.role === 'admin' || user.department === 'Admin';
+    if (isNewOrUpdatedAdmin) {
+      const otherAdmin = list.find(u => u.userId !== user.userId && (u.role === 'admin' || u.department === 'Admin'));
+      if (otherAdmin) {
+        throw new Error(`Only one Admin user profile is permitted for the company. '${otherAdmin.name}' is already registered as Admin.`);
+      }
+    }
+
     const idx = list.findIndex(u => u.userId === user.userId || u.pin === user.pin || (u.email && u.email === user.email));
     if (idx >= 0) {
       list[idx] = { ...list[idx], ...user };
@@ -598,7 +634,16 @@ export class DBService {
     await this.logAction(user.userId, user.name, 'UPDATE_USER', `Saved changes for user '${user.name}'`);
   }
 
+  private static async verifyAdmin(userId: string): Promise<void> {
+    const users = await this.getUsers();
+    const user = users.find(u => u.userId === userId);
+    if (!user || user.role !== 'admin') {
+      throw new Error("Unauthorized: Only Admin users are authorized to delete or clear data.");
+    }
+  }
+
   static async deleteUser(userId: string, operatorName: string, performerId: string, performerName: string): Promise<void> {
+    await this.verifyAdmin(performerId);
     // 1. Write to physical Firestore first
     if (useRealFirebase && db) {
       try {
@@ -633,11 +678,6 @@ export class DBService {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_job_cards'));
-        if (querySnapshot.empty) {
-          console.warn("Firestore returned empty job cards collection. Pre-populating local storage cache with defaultJobCards.");
-          setLocalStorageItem('mfr_job_cards', defaultJobCards);
-          return defaultJobCards;
-        }
         const cards: JobCard[] = [];
         querySnapshot.forEach((docSnap) => {
           cards.push(docSnap.data() as JobCard);
@@ -656,36 +696,59 @@ export class DBService {
   static async createJobCard(job: Omit<JobCard, 'jobCardNo' | 'orderNo' | 'createdAt' | 'completed' | 'balanceQty'>, creatorId: string, creatorName: string): Promise<JobCard> {
     const cards = await this.getJobCards();
     
+    const isPurchase = job.processType === 'Purchase';
+    const prefix = isPurchase ? 'PUR' : 'JC';
+
+    // Filter cards belonging to this series
+    const sameSeriesCards = cards.filter(card => {
+      if (isPurchase) {
+        return card.processType === 'Purchase' || card.jobCardNo.startsWith('PUR-');
+      } else {
+        return card.processType !== 'Purchase' && !card.jobCardNo.startsWith('PUR-');
+      }
+    });
+
     // Auto-generate sequentially
-    const currentMaxNo = cards.reduce((acc, card) => {
+    const currentMaxNo = sameSeriesCards.reduce((acc, card) => {
       const parts = card.jobCardNo.split('-');
-      const num = parts.length > 1 ? parseInt(parts[1]) : 1000;
+      const num = parts.length > 0 ? parseInt(parts[parts.length - 1]) : 1000;
       return !isNaN(num) && num > acc ? num : acc;
     }, 1000);
     const newNo = currentMaxNo + 1;
     
-    const jobCardNo = `JC-${newNo}`;
-    const orderNo = `ORD-${5000 + (newNo - 1000)}`;
-    
+    const jobCardNo = `${prefix}-${newNo}`;
+    const orderNo = isPurchase ? `ORD-PUR-${5000 + (newNo - 1000)}` : `ORD-${5000 + (newNo - 1000)}`;
+
     const newJob: JobCard = {
       ...job,
-      status: 'Pending Acceptance', // set to Pending Acceptance because an unaccepted movement has been created!
+      status: job.status || 'Pending Acceptance',
       createdBy: creatorName,
       jobCardNo,
       orderNo,
       balanceQty: job.orderQty, // initially complete orderQty
       createdAt: new Date().toISOString(),
       completed: false
-    };
+    } as JobCard;
 
     // 1. Update Local Storage offline cache first
     cards.unshift(newJob);
     setLocalStorageItem('mfr_job_cards', cards);
 
-    // Spawn an initial Material Movement from Dispatch to Production
+    // Spawn an initial Material Movement
     const movements = await this.getMovements();
     const newMovementId = `M-${2000 + movements.length + 1}`;
-    const initialMovement: MaterialMovement = {
+    
+    const initialMovement: MaterialMovement = isPurchase ? {
+      movementId: newMovementId,
+      jobCardNo,
+      fromDepartment: 'Purchase',
+      toDepartment: (job.currentDepartment as Department) || 'Store',
+      quantity: job.currentQty,
+      transferBy: creatorName,
+      transferDate: new Date().toISOString(),
+      accepted: false,
+      remarks: job.purchaseDetails?.remarks || `Material inwarded from Supplier: ${job.purchaseDetails?.supplierName || job.partyName}. Total Received: ${job.purchaseDetails?.receivedQty || job.orderQty} KG, Sent to ${job.currentDepartment || 'Store'}: ${job.currentQty} KG.`
+    } : {
       movementId: newMovementId,
       jobCardNo,
       fromDepartment: 'Dispatch',
@@ -696,40 +759,43 @@ export class DBService {
       accepted: false,
       remarks: 'Order registered. Dispatching raw material and job ticket to Production.'
     };
+
     movements.unshift(initialMovement);
     setLocalStorageItem('mfr_movements', movements);
     
-    // Send notifications to Production
+    // Send notifications to corresponding department
     await this.createNotification({
-      department: 'Production',
-      title: 'New Production Queue Item',
-      message: `Job Card ${jobCardNo} generated for ${job.partyName}. Quantity: ${job.orderQty} KG. Pending material acceptance.`,
-      userId: 'all_production'
+      department: isPurchase ? 'Store' : 'Production',
+      title: isPurchase ? 'New Purchase Inward Receipt' : 'New Production Queue Item',
+      message: isPurchase
+        ? `New Purchase Inward ${jobCardNo} generated for supplier ${job.partyName}. Quantity: ${job.currentQty} KG. Pending Store acceptance.`
+        : `Job Card ${jobCardNo} generated for ${job.partyName}. Quantity: ${job.orderQty} KG. Pending material acceptance.`,
+      userId: isPurchase ? 'all_store' : 'all_production'
     });
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
-      try {
+    await this.tryPhysicalWrite(
+      'Create Job Card',
+      `Create Job Card ${jobCardNo} for ${job.partyName} (${job.orderQty} KG)`,
+      [
+        { collection: 'mfr_job_cards', docId: jobCardNo, data: newJob, operation: 'set' },
+        { collection: 'mfr_movements', docId: newMovementId, data: initialMovement, operation: 'set' }
+      ],
+      async () => {
         await setDoc(doc(db, 'mfr_job_cards', jobCardNo), newJob);
         await setDoc(doc(db, 'mfr_movements', newMovementId), initialMovement);
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_job_cards/${jobCardNo}`);
-        const shouldThrow = err && (
-          err.code === 'permission-denied' || 
-          err.code === 'invalid-argument' || 
-          (err.message && (
-            err.message.toLowerCase().includes('permission') || 
-            err.message.toLowerCase().includes('denied')
-          ))
-        );
-        if (shouldThrow) {
-          throw err;
-        }
       }
-    }
+    );
 
     await this.logAction(creatorId, creatorName, 'CREATE_JOB_CARD', `Generated job card ${jobCardNo} for ${job.partyName} (${job.orderQty} KG)`);
     
+    // Automatically save item name and code to master list
+    try {
+      await this.saveItem(job.itemName, job.itemCode);
+    } catch (saveErr) {
+      console.warn("Failed to automatically save item:", saveErr);
+    }
+
     // Log to Google Sheets
     logJobCardToSheets(newJob).catch(err => console.warn('Google Sheets log failed: ', err));
     logMaterialMovementToSheets(initialMovement).catch(err => console.warn('Google Sheets movement log failed: ', err));
@@ -747,24 +813,28 @@ export class DBService {
     setLocalStorageItem('mfr_job_cards', cards);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
-      try {
-        await updateDoc(doc(db, 'mfr_job_cards', jobCardNo.toUpperCase()), updates as any);
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.UPDATE, `mfr_job_cards/${jobCardNo.toUpperCase()}`);
-        const shouldThrow = err && (
-          err.code === 'permission-denied' || 
-          err.code === 'invalid-argument' || 
-          (err.message && (
-            err.message.toLowerCase().includes('permission') || 
-            err.message.toLowerCase().includes('denied')
-          ))
-        );
-        if (shouldThrow) {
-          throw err;
+    await this.tryPhysicalWrite(
+      'Update Job Card',
+      `Update Job Card ${jobCardNo} (${updates.status || 'Details'})`,
+      [
+        { collection: 'mfr_job_cards', docId: jobCardNo.toUpperCase(), data: updates, operation: 'update' }
+      ],
+      async () => {
+        const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
+        const snapUpper = await getDoc(refUpper);
+        if (snapUpper.exists()) {
+          await updateDoc(refUpper, updates as any);
+        } else {
+          const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
+          const snapAsIs = await getDoc(refAsIs);
+          if (snapAsIs.exists()) {
+            await updateDoc(refAsIs, updates as any);
+          } else {
+            await updateDoc(refUpper, updates as any);
+          }
         }
       }
-    }
+    );
 
     await this.logAction(userId, userName, 'UPDATE_JOB_CARD', `Updated Job Card ${jobCardNo}. Status: ${updates.status || cards[idx].status}`);
     
@@ -800,10 +870,24 @@ export class DBService {
   }
 
   static async deleteJobCard(jobCardNo: string, userId: string, userName: string): Promise<void> {
+    await this.verifyAdmin(userId);
     // 1. Write to physical Firestore first
     if (useRealFirebase && db) {
       try {
-        await deleteDoc(doc(db, 'mfr_job_cards', jobCardNo.toUpperCase()));
+        const refUpper = doc(db, 'mfr_job_cards', jobCardNo.toUpperCase());
+        const snapUpper = await getDoc(refUpper);
+        if (snapUpper.exists()) {
+          await deleteDoc(refUpper);
+        } else {
+          const refAsIs = doc(db, 'mfr_job_cards', jobCardNo);
+          const snapAsIs = await getDoc(refAsIs);
+          if (snapAsIs.exists()) {
+            await deleteDoc(refAsIs);
+          } else {
+            // Default fallback
+            await deleteDoc(refUpper);
+          }
+        }
         
         // Cascade delete movements from Firestore
         const movementsSnap = await getDocs(query(collection(db, 'mfr_movements'), where('jobCardNo', '==', jobCardNo)));
@@ -854,6 +938,7 @@ export class DBService {
   }
 
   static async deleteAllJobCards(userId: string, userName: string): Promise<void> {
+    await this.verifyAdmin(userId);
     // 1. Update Local Storage offline cache first
     setLocalStorageItem('mfr_job_cards', []);
     setLocalStorageItem('mfr_movements', []);
@@ -884,21 +969,62 @@ export class DBService {
     await this.logAction(userId, userName, 'DELETE_ALL_JOB_CARDS', `Deleted all job card entries, material movements, and notifications from database`);
   }
 
+  static async factoryReset(userId: string, userName: string): Promise<void> {
+    await this.verifyAdmin(userId);
+
+    // 1. Reset Local Storage offline cache
+    setLocalStorageItem('mfr_users', defaultUsers);
+    setLocalStorageItem('mfr_job_cards', defaultJobCards);
+    setLocalStorageItem('mfr_movements', defaultMovements);
+    setLocalStorageItem('mfr_notifications', defaultNotifications);
+    setLocalStorageItem('mfr_items', defaultSavedItems);
+    setLocalStorageItem('mfr_audit_logs', defaultAuditLogs);
+    setLocalStorageItem('mfr_company_config', defaultCompanyConfig);
+
+    // 2. Write to physical Firestore
+    if (useRealFirebase && db) {
+      try {
+        const collectionsToReset = [
+          { name: 'mfr_users', data: defaultUsers, idKey: 'userId' },
+          { name: 'mfr_job_cards', data: defaultJobCards, idKey: 'jobCardNo' },
+          { name: 'mfr_movements', data: defaultMovements, idKey: 'movementId' },
+          { name: 'mfr_notifications', data: defaultNotifications, idKey: 'notificationId' },
+          { name: 'mfr_items', data: defaultSavedItems, idKey: 'id' },
+          { name: 'mfr_audit_logs', data: defaultAuditLogs, idKey: 'id' }
+        ];
+
+        for (const colInfo of collectionsToReset) {
+          const querySnapshot = await getDocs(collection(db, colInfo.name));
+          for (const docSnap of querySnapshot.docs) {
+            await deleteDoc(doc(db, colInfo.name, docSnap.id));
+          }
+          for (const entry of colInfo.data) {
+            const docId = (entry as any)[colInfo.idKey];
+            await setDoc(doc(db, colInfo.name, docId), entry);
+          }
+        }
+
+        // Global Config and Seeded flag
+        const globalRef = doc(db, 'mfr_company_config', 'global');
+        await setDoc(globalRef, defaultCompanyConfig);
+
+        const seededRef = doc(db, 'mfr_company_config', 'seeded');
+        await setDoc(seededRef, { companyName: 'SystemSeeded', details: 'Initialized' } as CompanyConfig);
+
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, 'mfr_company_config');
+      }
+    }
+
+    await this.logAction(userId, userName, 'FACTORY_RESET', `Triggered full system Factory Reset back to initial default seed state`);
+  }
+
   // --- MATERIAL MOVEMENTS ---
   static async getMovements(): Promise<MaterialMovement[]> {
     if (useRealFirebase && db) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_movements'));
-        if (querySnapshot.empty) {
-          console.warn("Firestore returned empty movements collection. Pre-populating local storage and Firestore with defaultMovements.");
-          setLocalStorageItem('mfr_movements', defaultMovements);
-          // Auto-heal/seed the physical collection as well
-          for (const m of defaultMovements) {
-            await setDoc(doc(db, 'mfr_movements', m.movementId), m);
-          }
-          return defaultMovements;
-        }
         const list: MaterialMovement[] = [];
         querySnapshot.forEach((docSnap) => {
           list.push(docSnap.data() as MaterialMovement);
@@ -923,48 +1049,51 @@ export class DBService {
       transferBy: movement.transferBy || userName || 'Staff',
       movementId: newId,
       transferDate: new Date().toISOString(),
-      accepted: false
+      accepted: false,
+      initiatedByUserId: userId,
+      initiatedByUserName: userName
     };
 
     // 1. Update Local Storage offline cache first
     movements.unshift(newMov);
     setLocalStorageItem('mfr_movements', movements);
     
-    // Update Job Card department & status to show pending placement
-    await this.updateJobCard(movement.jobCardNo, {
-      status: 'Pending Acceptance',
-      currentDepartment: movement.toDepartment as Department
-    }, userId, userName);
+    // Update Job Card department & status to show pending placement (only if NOT a Dispatch Issue Request)
+    if (!movement.isIssueRequest) {
+      await this.updateJobCard(movement.jobCardNo, {
+        status: 'Pending Acceptance',
+        currentDepartment: movement.toDepartment as Department
+      }, userId, userName);
+    }
 
     // Create Notification for the receiving department
     await this.createNotification({
-      department: movement.toDepartment === 'Completed' ? 'Dispatch' : (movement.toDepartment as Department),
-      title: 'Material Sent',
-      message: `Job Card ${movement.jobCardNo}: ${movement.quantity} KG transferred from ${movement.fromDepartment} to ${movement.toDepartment}.`,
-      userId: `all_${movement.toDepartment.toLowerCase().replace(' ', '_')}`
+      department: movement.isIssueRequest ? 'Store' : (movement.toDepartment === 'Completed' ? 'Dispatch' : (movement.toDepartment as Department)),
+      title: movement.isIssueRequest ? 'Dispatch Issue Request' : 'Material Sent',
+      message: movement.isIssueRequest
+        ? `Job Card ${movement.jobCardNo}: Dispatch requested issue of ${movement.requestedQty} ${(movement as any).requestedUnit || 'KG'} from Store.`
+        : `Job Card ${movement.jobCardNo}: ${movement.quantity} KG transferred from ${movement.fromDepartment} to ${movement.toDepartment}.`,
+      userId: movement.isIssueRequest ? 'all_store' : `all_${movement.toDepartment.toLowerCase().replace(' ', '_')}`
     });
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
-      try {
+    await this.tryPhysicalWrite(
+      'Transfer Material',
+      `Transfer ${movement.quantity} KG of ${movement.jobCardNo} to ${movement.toDepartment}`,
+      [
+        { collection: 'mfr_movements', docId: newId, data: newMov, operation: 'set' }
+      ],
+      async () => {
         await setDoc(doc(db, 'mfr_movements', newId), newMov);
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${newId}`);
-        const shouldThrow = err && (
-          err.code === 'permission-denied' || 
-          err.code === 'invalid-argument' || 
-          (err.message && (
-            err.message.toLowerCase().includes('permission') || 
-            err.message.toLowerCase().includes('denied')
-          ))
-        );
-        if (shouldThrow) {
-          throw err;
-        }
       }
-    }
+    );
 
-    await this.logAction(userId, userName, 'TRANSFER_MATERIAL', `Transferred ${movement.quantity} KG of ${movement.jobCardNo} to ${movement.toDepartment}`);
+    await this.logAction(
+      userId, 
+      userName, 
+      'TRANSFER_MATERIAL', 
+      `User ${userName} (ID: ${userId}) initiated material movement ${newId}: Transferred ${movement.quantity} KG of Job Card ${movement.jobCardNo} from ${movement.fromDepartment} to ${movement.toDepartment}.`
+    );
     
     // Log to Google Sheets
     logMaterialMovementToSheets(newMov).catch(err => console.warn('Google Sheets movement log failed:', err));
@@ -972,7 +1101,13 @@ export class DBService {
     return newMov;
   }
 
-  static async acceptMovement(movementId: string, acceptedByUserId: string, acceptedByName: string, remarks?: string): Promise<void> {
+  static async acceptMovement(
+    movementId: string, 
+    acceptedByUserId: string, 
+    acceptedByName: string, 
+    remarks?: string,
+    extraFields?: { allottedLocation?: string; rackNo?: string; quantity?: number; issueStatus?: 'Issued' | 'Rejected' }
+  ): Promise<void> {
     const list = await this.getMovements();
     const idx = list.findIndex(m => m.movementId === movementId);
     if (idx === -1) throw new Error(`Movement ${movementId} not found`);
@@ -982,29 +1117,32 @@ export class DBService {
     mov.acceptedBy = acceptedByName;
     mov.acceptedDate = new Date().toISOString();
     if (remarks) mov.remarks = remarks;
+    if (extraFields?.allottedLocation !== undefined) mov.allottedLocation = extraFields.allottedLocation;
+    if (extraFields?.rackNo !== undefined) mov.rackNo = extraFields.rackNo;
+    if (extraFields?.quantity !== undefined) mov.quantity = extraFields.quantity;
+    if (extraFields?.issueStatus !== undefined) mov.issueStatus = extraFields.issueStatus;
+    else if (mov.isIssueRequest) mov.issueStatus = 'Issued';
+
+    // Track modification in the perfect audit trail
+    mov.modifiedByUserId = acceptedByUserId;
+    mov.modifiedByUserName = acceptedByName;
+    mov.modifiedDate = new Date().toISOString();
+    mov.modifiedAction = 'ACCEPT';
 
     // 1. Update Local Storage offline cache first
     setLocalStorageItem('mfr_movements', list);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
-      try {
+    await this.tryPhysicalWrite(
+      'Accept Material',
+      `Accept ${mov.quantity} KG of ${mov.jobCardNo} at ${mov.toDepartment}`,
+      [
+        { collection: 'mfr_movements', docId: movementId, data: mov, operation: 'set' }
+      ],
+      async () => {
         await setDoc(doc(db, 'mfr_movements', movementId), mov);
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${movementId}`);
-        const shouldThrow = err && (
-          err.code === 'permission-denied' || 
-          err.code === 'invalid-argument' || 
-          (err.message && (
-            err.message.toLowerCase().includes('permission') || 
-            err.message.toLowerCase().includes('denied')
-          ))
-        );
-        if (shouldThrow) {
-          throw err;
-        }
       }
-    }
+    );
 
     // Update the corresponding job card status
     // If sent to 'Completed', process job card closure
@@ -1032,11 +1170,25 @@ export class DBService {
       // Set to appropriate state inside the target department
       // If entering Production, start as Pending to let them initiate the run, otherwise In Process.
       const targetStatus = mov.toDepartment === 'Production' ? 'Pending' : 'In Process';
-      await this.updateJobCard(mov.jobCardNo, {
-        status: targetStatus as JobCardStatus,
-        currentDepartment: mov.toDepartment as Department,
-        currentQty: mov.quantity // update quantity to the accepted batch
-      }, acceptedByUserId, acceptedByName);
+      
+      const jobCards = await this.getJobCards();
+      const jobCard = jobCards.find(c => c.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
+      
+      const updates: any = {
+        status: targetStatus,
+        currentDepartment: mov.toDepartment,
+        currentQty: mov.quantity
+      };
+
+      if (mov.toDepartment === 'Store' && extraFields) {
+        updates.storeDetails = {
+          ...(jobCard?.storeDetails || {}),
+          locationBin: extraFields.allottedLocation || jobCard?.storeDetails?.locationBin || '',
+          rackNo: extraFields.rackNo || jobCard?.storeDetails?.rackNo || ''
+        };
+      }
+
+      await this.updateJobCard(mov.jobCardNo, updates, acceptedByUserId, acceptedByName);
 
       await this.createNotification({
         department: mov.fromDepartment,
@@ -1046,7 +1198,12 @@ export class DBService {
       });
     }
 
-    await this.logAction(acceptedByUserId, acceptedByName, 'ACCEPT_MATERIAL', `Accepted transfer of ${mov.quantity} KG for ${mov.jobCardNo}`);
+    await this.logAction(
+      acceptedByUserId, 
+      acceptedByName, 
+      'ACCEPT_MATERIAL', 
+      `User ${acceptedByName} (ID: ${acceptedByUserId}) accepted/modified material movement ${movementId}: Confirmed transfer of ${mov.quantity} KG for ${mov.jobCardNo} at ${mov.toDepartment}.`
+    );
     
     // Log to Google Sheets
     logMaterialMovementToSheets(mov).catch(err => console.warn('Google Sheets movement log failed:', err));
@@ -1058,28 +1215,26 @@ export class DBService {
     const idx = list.findIndex(m => m.movementId === movementId);
     if (idx === -1) throw new Error(`Movement ${movementId} not found`);
     const mov = list[idx];
+    
+    // Track deletion/rejection info before we splice it out of active list
+    mov.deletedByUserId = rejectedByUserId;
+    mov.deletedByUserName = rejectedByName;
+    mov.deletedDate = new Date().toISOString();
+
     list.splice(idx, 1);
     setLocalStorageItem('mfr_movements', list);
 
     // 2. Write to physical Firestore
-    if (useRealFirebase && db) {
-      try {
+    await this.tryPhysicalWrite(
+      'Reject Material',
+      `Reject ${mov.quantity} KG of ${mov.jobCardNo} from ${mov.fromDepartment}`,
+      [
+        { collection: 'mfr_movements', docId: movementId, operation: 'delete' }
+      ],
+      async () => {
         await deleteDoc(doc(db, 'mfr_movements', movementId));
-      } catch (err: any) {
-        handleFirestoreError(err, OperationType.DELETE, `mfr_movements/${movementId}`);
-        const shouldThrow = err && (
-          err.code === 'permission-denied' || 
-          err.code === 'invalid-argument' || 
-          (err.message && (
-            err.message.toLowerCase().includes('permission') || 
-            err.message.toLowerCase().includes('denied')
-          ))
-        );
-        if (shouldThrow) {
-          throw err;
-        }
       }
-    }
+    );
 
     // Revert Job Card department to previous and mark status 'Rejected'
     await this.updateJobCard(mov.jobCardNo, {
@@ -1095,7 +1250,12 @@ export class DBService {
       userId: `all_${mov.fromDepartment.toLowerCase().replace(' ', '_')}`
     });
 
-    await this.logAction(rejectedByUserId, rejectedByName, 'REJECT_MATERIAL', `Rejected ${mov.quantity} KG for ${mov.jobCardNo}. Reason: ${remarks}`);
+    await this.logAction(
+      rejectedByUserId, 
+      rejectedByName, 
+      'REJECT_MATERIAL', 
+      `User ${rejectedByName} (ID: ${rejectedByUserId}) rejected/deleted material movement ${movementId}: Sent ${mov.quantity} KG of Job Card ${mov.jobCardNo} back to ${mov.fromDepartment} from ${mov.toDepartment}. Reason: "${remarks}"`
+    );
     
     // Log to Google Sheets
     logMaterialMovementToSheets({
@@ -1105,17 +1265,94 @@ export class DBService {
     }).catch(err => console.warn('Google Sheets movement log failed:', err));
   }
 
+  static async updateMovement(movementId: string, quantity: number, remarks: string, userId: string, userName: string): Promise<void> {
+    const list = await this.getMovements();
+    const idx = list.findIndex(m => m.movementId === movementId);
+    if (idx === -1) throw new Error(`Movement ${movementId} not found`);
+    const mov = list[idx];
+    const oldQty = mov.quantity;
+    
+    mov.quantity = quantity;
+    if (remarks) mov.remarks = remarks;
+    
+    mov.modifiedByUserId = userId;
+    mov.modifiedByUserName = userName;
+    mov.modifiedDate = new Date().toISOString();
+    mov.modifiedAction = 'EDIT';
+
+    // 1. Update Local Storage offline cache first
+    setLocalStorageItem('mfr_movements', list);
+
+    // 2. Write to physical Firestore
+    if (useRealFirebase && db) {
+      try {
+        await setDoc(doc(db, 'mfr_movements', movementId), mov);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.WRITE, `mfr_movements/${movementId}`);
+      }
+    }
+
+    // Also update current quantity on the job card if it is currently in the active department
+    const cards = await this.getJobCards();
+    const cardIdx = cards.findIndex(c => c.jobCardNo.toLowerCase() === mov.jobCardNo.toLowerCase());
+    if (cardIdx >= 0) {
+      const card = cards[cardIdx];
+      if (card.currentDepartment === mov.toDepartment) {
+        await this.updateJobCard(mov.jobCardNo, {
+          currentQty: quantity
+        }, userId, userName);
+      }
+    }
+
+    await this.logAction(
+      userId, 
+      userName, 
+      'MODIFY_MOVEMENT', 
+      `User ${userName} (ID: ${userId}) modified material movement ${movementId} (Job Card ${mov.jobCardNo}): changed quantity from ${oldQty} KG to ${quantity} KG. Remarks: "${remarks}"`
+    );
+
+    // Log to Google Sheets
+    logMaterialMovementToSheets(mov).catch(err => console.warn('Google Sheets movement log failed:', err));
+  }
+
+  static async deleteMovement(movementId: string, userId: string, userName: string): Promise<void> {
+    const list = await this.getMovements();
+    const idx = list.findIndex(m => m.movementId === movementId);
+    if (idx === -1) throw new Error(`Movement ${movementId} not found`);
+    const mov = list[idx];
+
+    // Track deletion info before we delete it
+    mov.deletedByUserId = userId;
+    mov.deletedByUserName = userName;
+    mov.deletedDate = new Date().toISOString();
+
+    // 1. Remove from Local Storage list
+    list.splice(idx, 1);
+    setLocalStorageItem('mfr_movements', list);
+
+    // 2. Write to physical Firestore
+    if (useRealFirebase && db) {
+      try {
+        await deleteDoc(doc(db, 'mfr_movements', movementId));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `mfr_movements/${movementId}`);
+      }
+    }
+
+    await this.logAction(
+      userId, 
+      userName, 
+      'DELETE_MOVEMENT', 
+      `User ${userName} (ID: ${userId}) deleted material movement ${movementId} for Job Card ${mov.jobCardNo}: Removed transit record of ${mov.quantity} KG from ${mov.fromDepartment} to ${mov.toDepartment}.`
+    );
+  }
+
   // --- NOTIFICATIONS ---
   static async getNotifications(): Promise<AppNotification[]> {
     if (useRealFirebase && db) {
       try {
         await this.ensureSeeded();
         const querySnapshot = await getDocs(collection(db, 'mfr_notifications'));
-        if (querySnapshot.empty) {
-          console.warn("Firestore returned empty notifications collection. Pre-populating local storage cache with defaultNotifications.");
-          setLocalStorageItem('mfr_notifications', defaultNotifications);
-          return defaultNotifications;
-        }
         const list: AppNotification[] = [];
         querySnapshot.forEach((docSnap) => {
           list.push(docSnap.data() as AppNotification);
@@ -1155,6 +1392,22 @@ export class DBService {
     }
 
     return newNotif;
+  }
+
+  static async deleteNotification(id: string): Promise<void> {
+    // 1. Update Local Storage offline cache first
+    const list = await this.getNotifications();
+    const filtered = list.filter(n => n.notificationId !== id);
+    setLocalStorageItem('mfr_notifications', filtered);
+
+    // 2. Write to physical Firestore
+    if (useRealFirebase && db) {
+      try {
+        await deleteDoc(doc(db, 'mfr_notifications', id));
+      } catch (err) {
+        handleFirestoreError(err, OperationType.DELETE, `mfr_notifications/${id}`);
+      }
+    }
   }
 
   static async markNotificationRead(id: string): Promise<void> {
@@ -1281,7 +1534,8 @@ export class DBService {
     logActionToSheets(newLog).catch(err => console.warn('Google Sheets action log failed:', err));
   }
 
-  static async deleteAuditLog(logId: string): Promise<void> {
+  static async deleteAuditLog(logId: string, performerId: string): Promise<void> {
+    await this.verifyAdmin(performerId);
     if (useRealFirebase && db) {
       try {
         await deleteDoc(doc(db, 'mfr_audit_logs', logId));
@@ -1293,6 +1547,209 @@ export class DBService {
     const logs = await this.getAuditLogs();
     const filtered = logs.filter(l => l.id !== logId);
     setLocalStorageItem('mfr_audit_logs', filtered);
+  }
+
+  // --- SAVED ITEMS ---
+  static async getSavedItems(): Promise<SavedItem[]> {
+    if (useRealFirebase && db) {
+      try {
+        await this.ensureSeeded();
+        const querySnapshot = await getDocs(collection(db, 'mfr_items'));
+        const list: SavedItem[] = [];
+        querySnapshot.forEach((docSnap) => {
+          list.push(docSnap.data() as SavedItem);
+        });
+        const sorted = list.sort((a, b) => new Date(b.createdAt || '').getTime() - new Date(a.createdAt || '').getTime());
+        setLocalStorageItem('mfr_items', sorted);
+        return sorted;
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, 'mfr_items');
+      }
+    }
+    return getLocalStorageItem<SavedItem[]>('mfr_items', defaultSavedItems);
+  }
+
+  static async saveItem(itemName: string, itemCode: string): Promise<void> {
+    if (!itemName || !itemCode) return;
+    const items = await this.getSavedItems();
+    const normalizedName = itemName.trim().toLowerCase();
+    const normalizedCode = itemCode.trim().toLowerCase();
+    
+    const exists = items.some(item => 
+      item.itemName.trim().toLowerCase() === normalizedName && 
+      item.itemCode.trim().toLowerCase() === normalizedCode
+    );
+    if (exists) return;
+
+    const newId = `item-${Date.now()}`;
+    const newItem: SavedItem = {
+      id: newId,
+      itemName: itemName.trim(),
+      itemCode: itemCode.trim(),
+      createdAt: new Date().toISOString()
+    };
+
+    items.unshift(newItem);
+    setLocalStorageItem('mfr_items', items);
+
+    await this.tryPhysicalWrite(
+      'Save Item Autocomplete',
+      `Save Item Autocomplete: ${itemName} (${itemCode})`,
+      [
+        { collection: 'mfr_items', docId: newId, data: newItem, operation: 'set' }
+      ],
+      async () => {
+        await setDoc(doc(db, 'mfr_items', newId), newItem);
+      }
+    );
+  }
+
+  // --- SYNC QUEUE MANAGEMENT ---
+  private static async tryPhysicalWrite(
+    action: string,
+    description: string,
+    operations: SyncQueueOperation[],
+    physicalWriteFn: () => Promise<void>
+  ): Promise<void> {
+    if (useRealFirebase && db) {
+      if (!navigator.onLine) {
+        isFirestoreOffline = true;
+        await this.addToSyncQueue(action, description, operations);
+        return;
+      }
+      try {
+        await physicalWriteFn();
+      } catch (err: any) {
+        handleFirestoreError(err, OperationType.WRITE, operations[0]?.collection || 'unknown');
+        
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        const isOffline = 
+          errorMessage.toLowerCase().includes('offline') || 
+          errorMessage.toLowerCase().includes('unavailable') ||
+          errorMessage.toLowerCase().includes('network') ||
+          errorMessage.toLowerCase().includes('could not be reached') ||
+          err.code === 'unavailable' ||
+          err.code === 'deadline-exceeded';
+
+        if (isOffline) {
+          await this.addToSyncQueue(action, description, operations);
+        } else {
+          throw err;
+        }
+      }
+    } else {
+      if (!navigator.onLine) {
+        await this.addToSyncQueue(action, description, operations);
+      }
+    }
+  }
+
+  static getSyncQueue(): SyncQueueItem[] {
+    return getLocalStorageItem<SyncQueueItem[]>('mfr_sync_queue', []);
+  }
+
+  static async addToSyncQueue(action: string, description: string, operations: SyncQueueOperation[]): Promise<void> {
+    const queue = this.getSyncQueue();
+    // Avoid duplicates of pending identical items
+    const isDup = queue.some(item => 
+      item.action === action && 
+      item.description === description && 
+      item.status === 'pending'
+    );
+    if (isDup) return;
+
+    const newItem: SyncQueueItem = {
+      id: `sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      action,
+      description,
+      timestamp: new Date().toISOString(),
+      status: 'pending',
+      operations
+    };
+    queue.push(newItem);
+    setLocalStorageItem('mfr_sync_queue', queue);
+    window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+  }
+
+  static async retrySyncItem(id: string): Promise<boolean> {
+    const queue = this.getSyncQueue();
+    const idx = queue.findIndex(item => item.id === id);
+    if (idx === -1) return false;
+
+    const item = queue[idx];
+    item.status = 'pending';
+    item.error = undefined;
+    setLocalStorageItem('mfr_sync_queue', queue);
+    window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+
+    if (useRealFirebase && db) {
+      try {
+        for (const op of item.operations) {
+          if (op.operation === 'set') {
+            await setDoc(doc(db, op.collection, op.docId), op.data);
+          } else if (op.operation === 'update') {
+            await updateDoc(doc(db, op.collection, op.docId), op.data);
+          } else if (op.operation === 'delete') {
+            await deleteDoc(doc(db, op.collection, op.docId));
+          }
+        }
+        const updatedQueue = this.getSyncQueue();
+        const updatedIdx = updatedQueue.findIndex(q => q.id === id);
+        if (updatedIdx !== -1) {
+          updatedQueue[updatedIdx].status = 'synced';
+          setLocalStorageItem('mfr_sync_queue', updatedQueue);
+        }
+        window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+        return true;
+      } catch (err: any) {
+        console.error(`Failed to sync queue item ${id}:`, err);
+        const updatedQueue = this.getSyncQueue();
+        const updatedIdx = updatedQueue.findIndex(q => q.id === id);
+        if (updatedIdx !== -1) {
+          updatedQueue[updatedIdx].status = 'failed';
+          updatedQueue[updatedIdx].error = err instanceof Error ? err.message : String(err);
+          setLocalStorageItem('mfr_sync_queue', updatedQueue);
+        }
+        window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+        return false;
+      }
+    } else {
+      if (navigator.onLine) {
+        const updatedQueue = this.getSyncQueue();
+        const updatedIdx = updatedQueue.findIndex(q => q.id === id);
+        if (updatedIdx !== -1) {
+          updatedQueue[updatedIdx].status = 'synced';
+          setLocalStorageItem('mfr_sync_queue', updatedQueue);
+        }
+        window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+        return true;
+      } else {
+        const updatedQueue = this.getSyncQueue();
+        const updatedIdx = updatedQueue.findIndex(q => q.id === id);
+        if (updatedIdx !== -1) {
+          updatedQueue[updatedIdx].status = 'failed';
+          updatedQueue[updatedIdx].error = "Still offline (simulated)";
+          setLocalStorageItem('mfr_sync_queue', updatedQueue);
+        }
+        window.dispatchEvent(new CustomEvent('sync-queue-updated'));
+        return false;
+      }
+    }
+  }
+
+  static async retryAllSyncItems(): Promise<void> {
+    const queue = this.getSyncQueue();
+    const pendingAndFailed = queue.filter(item => item.status === 'pending' || item.status === 'failed');
+    for (const item of pendingAndFailed) {
+      await this.retrySyncItem(item.id);
+    }
+  }
+
+  static clearSyncQueue(): void {
+    const queue = this.getSyncQueue();
+    const remaining = queue.filter(item => item.status !== 'synced');
+    setLocalStorageItem('mfr_sync_queue', remaining);
+    window.dispatchEvent(new CustomEvent('sync-queue-updated'));
   }
 
   // --- COMPANY CONFIG ---
@@ -1324,6 +1781,87 @@ export class DBService {
     }
     setLocalStorageItem('mfr_company_config', config);
     await this.logAction(userId, userName, 'UPDATE_COMPANY_CONFIG', `Updated Company details to: ${config.companyName}`);
+  }
+
+  static async exportDatabaseDump(): Promise<Record<string, any>> {
+    const [users, jobCards, movements, notifications, auditLogs, items, companyConfig] = await Promise.all([
+      this.getUsers(),
+      this.getJobCards(),
+      this.getMovements(),
+      this.getNotifications(),
+      this.getAuditLogs(),
+      this.getSavedItems(),
+      this.getCompanyConfig()
+    ]);
+    return {
+      users,
+      jobCards,
+      movements,
+      notifications,
+      auditLogs,
+      items,
+      companyConfig,
+      exportedAt: new Date().toISOString(),
+      version: "1.0.0"
+    };
+  }
+
+  static async restoreDatabaseDump(dump: Record<string, any>, userId: string, userName: string): Promise<void> {
+    if (!dump || typeof dump !== 'object') {
+      throw new Error("Invalid backup payload");
+    }
+
+    // Restore to local storage caches first
+    if (Array.isArray(dump.users)) setLocalStorageItem('mfr_users', dump.users);
+    if (Array.isArray(dump.jobCards)) setLocalStorageItem('mfr_job_cards', dump.jobCards);
+    if (Array.isArray(dump.movements)) setLocalStorageItem('mfr_movements', dump.movements);
+    if (Array.isArray(dump.notifications)) setLocalStorageItem('mfr_notifications', dump.notifications);
+    if (Array.isArray(dump.auditLogs)) setLocalStorageItem('mfr_audit_logs', dump.auditLogs);
+    if (Array.isArray(dump.items)) setLocalStorageItem('mfr_items', dump.items);
+    if (dump.companyConfig) setLocalStorageItem('mfr_company_config', dump.companyConfig);
+
+    // If live firebase is active, we can write them physically to Firestore as well!
+    if (useRealFirebase && db) {
+      try {
+        // Write company config
+        if (dump.companyConfig) {
+          await setDoc(doc(db, 'mfr_company_config', 'global'), dump.companyConfig);
+        }
+        // Write users
+        if (Array.isArray(dump.users)) {
+          for (const u of dump.users) {
+            await setDoc(doc(db, 'mfr_users', u.userId), u);
+          }
+        }
+        // Write job cards
+        if (Array.isArray(dump.jobCards)) {
+          for (const j of dump.jobCards) {
+            await setDoc(doc(db, 'mfr_job_cards', j.jobCardNo), j);
+          }
+        }
+        // Write movements
+        if (Array.isArray(dump.movements)) {
+          for (const m of dump.movements) {
+            await setDoc(doc(db, 'mfr_movements', m.movementId), m);
+          }
+        }
+        // Write items
+        if (Array.isArray(dump.items)) {
+          for (const i of dump.items) {
+            await setDoc(doc(db, 'mfr_items', i.id), i);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not sync all backup collections to physical Firestore:", err);
+      }
+    }
+
+    await this.logAction(
+      userId,
+      userName,
+      'RESTORE_DATABASE',
+      `Database restored from backup timestamped ${dump.exportedAt || 'unknown'}`
+    );
   }
 
   // Realtime subscription emulation & Live Firestore triggers

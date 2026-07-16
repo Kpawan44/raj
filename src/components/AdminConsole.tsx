@@ -18,11 +18,24 @@ import {
   FileSpreadsheet,
   ExternalLink,
   Layers,
-  RefreshCw
+  RefreshCw,
+  RotateCcw,
+  TrendingUp,
+  Edit,
+  Download
 } from 'lucide-react';
-import { UserProfile, AuditLog, Department, JobCard, MaterialMovement, CompanyConfig } from '../types';
+import { UserProfile, AuditLog, Department, JobCard, MaterialMovement, CompanyConfig, JobCardStatus } from '../types';
 import { getJobCardProcessMetrics } from '../lib/metrics';
 import { DBService } from '../lib/firebase';
+import { 
+  isAutoBackupEnabled, 
+  setAutoBackupEnabled, 
+  getStoredBackups, 
+  createDatabaseBackup, 
+  deleteDatabaseBackup, 
+  downloadBackupAsJsonFile,
+  DatabaseBackup 
+} from '../lib/backup';
 
 interface AdminConsoleProps {
   users: UserProfile[];
@@ -41,6 +54,9 @@ interface AdminConsoleProps {
   onOpenSheetsModal?: () => void;
   onDisconnectSheets?: () => void;
   onOpenSheetsInspector?: () => void;
+  onSetJobCards?: (cards: JobCard[]) => void;
+  onUpdateMovement?: (movementId: string, quantity: number, remarks: string) => void | Promise<void>;
+  onDeleteMovement?: (movementId: string) => void | Promise<void>;
 }
 
 export default function AdminConsole({ 
@@ -59,11 +75,76 @@ export default function AdminConsole({
   sheetsDetails,
   onOpenSheetsModal,
   onDisconnectSheets,
-  onOpenSheetsInspector
+  onOpenSheetsInspector,
+  onSetJobCards,
+  onUpdateMovement,
+  onDeleteMovement
 }: AdminConsoleProps) {
-  const [activeSubTab, setActiveSubTab] = useState<'users' | 'settings' | 'audit' | 'jobs' | 'stock' | 'company' | 'all'>('users');
+  const [activeSubTab, setActiveSubTab] = useState<'users' | 'settings' | 'audit' | 'jobs' | 'movements' | 'stock' | 'company' | 'all'>('users');
   const [searchTerm, setSearchTerm] = useState('');
   
+  // --- HIGH-SCALE LOAD TESTING AND SIMULATION ---
+  const [isGenerating100k, setIsGenerating100k] = useState(false);
+  const [originalCards, setOriginalCards] = useState<JobCard[]>([]);
+
+  const handleGenerate100kSimulated = () => {
+    setIsGenerating100k(true);
+    if (originalCards.length === 0) {
+      setOriginalCards(jobCards);
+    }
+    
+    setTimeout(() => {
+      const startTime = performance.now();
+      const mockCards: JobCard[] = [];
+      const parties = ["Global Heavy Industries", "Ace Aerospace Ltd.", "Apex Motors Corporation", "Standard Fasteners Corp", "Metro Infrastructure", "Titan Forgings"];
+      const items = ["Hardened M12 Hex Bolt (Class 10.9)", "Anchor Shaft Pin 45mm", "Precision Plated Spacer Sleeve", "Heavy-Duty Structural Flange", "Heat Treated Gear Hub", "Plated Cotter Key"];
+      const depts: Department[] = ['Purchase', 'Dispatch', 'Production', 'Heat Treatment', 'Plating', 'Packing', 'Store'];
+      const statuses: JobCardStatus[] = ['Pending', 'In Process', 'Completed', 'Rejected', 'Pending Acceptance'];
+
+      for (let i = 1; i <= 100000; i++) {
+        const pIdx = i % parties.length;
+        const iIdx = i % items.length;
+        const dIdx = i % depts.length;
+        const sIdx = i % statuses.length;
+        
+        mockCards.push({
+          jobCardNo: `JC-SIM-${100000 + i}`,
+          orderNo: `ORD-SIM-${500000 + i}`,
+          partyName: parties[pIdx],
+          itemName: items[iIdx],
+          itemCode: `MFR-LOAD-${1000 + (i % 999)}`,
+          orderQty: 250 + (i % 1000),
+          currentQty: 250 + (i % 1000),
+          balanceQty: (i % 4 === 0) ? 0 : 50 + (i % 200),
+          currentDepartment: depts[dIdx],
+          status: statuses[sIdx],
+          heatTreatmentRequired: (i % 3 === 0) ? false : (i % 2 === 0),
+          processType: (i % 3 === 0) ? 'Purchase' : 'Manufacturing',
+          createdBy: "Automated Benchmark Engine",
+          createdAt: new Date(Date.now() - (i * 60 * 1000)).toISOString(),
+          completed: i % 4 === 0
+        });
+      }
+
+      const duration = (performance.now() - startTime).toFixed(1);
+      if (onSetJobCards) {
+        onSetJobCards(mockCards);
+      }
+      setIsGenerating100k(false);
+      showToast(`Successfully injected 100,000 simulated Job Cards in-memory in ${duration}ms!`, "success");
+      onLogAction('BENCHMARK_SIMULATE_100K', `Generated and injected 100,000 high-scale virtual job card entries in ${duration}ms.`);
+    }, 50);
+  };
+
+  const handleResetToOriginal = () => {
+    if (originalCards.length > 0 && onSetJobCards) {
+      onSetJobCards(originalCards);
+      showToast("Successfully restored original database records.", "info");
+    } else if (onRefreshJobs) {
+      onRefreshJobs();
+    }
+  };
+
   // Create New User Forms State
   const [showAddForm, setShowAddForm] = useState(false);
   const [newUserName, setNewUserName] = useState('');
@@ -76,10 +157,16 @@ export default function AdminConsole({
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmDeleteName, setConfirmDeleteName] = useState<string>('');
 
+  // Editing movement states
+  const [editingMovementId, setEditingMovementId] = useState<string | null>(null);
+  const [editMovementQty, setEditMovementQty] = useState<number>(0);
+  const [editMovementRemarks, setEditMovementRemarks] = useState<string>('');
+
   // Bulk selection states
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [selectedJobNos, setSelectedJobNos] = useState<string[]>([]);
   const [selectedAuditLogIds, setSelectedAuditLogIds] = useState<string[]>([]);
+  const [selectedMovementIds, setSelectedMovementIds] = useState<string[]>([]);
 
   // --- NON-BLOCKING LOCAL TOASTS & CONFIRMATIONS ---
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -91,6 +178,7 @@ export default function AdminConsole({
     cancelText?: string;
     requireText?: string;
   } | null>(null);
+  const [verificationInput, setVerificationInput] = useState('');
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
@@ -100,10 +188,62 @@ export default function AdminConsole({
   };
 
   const showConfirm = (title: string, message: string, onConfirm: () => void | Promise<void>, confirmText = 'Confirm', cancelText = 'Cancel', requireText?: string) => {
+    setVerificationInput('');
     setConfirmDialog({ title, message, onConfirm, confirmText, cancelText, requireText });
   };
 
   const isManager = currentUser?.role === 'admin';
+
+  // --- AUTO-BACKUP STATE AND HANDLERS ---
+  const [autoBackupActive, setAutoBackupActive] = useState<boolean>(isAutoBackupEnabled());
+  const [storedBackups, setStoredBackups] = useState<DatabaseBackup[]>(getStoredBackups());
+
+  const handleToggleAutoBackup = (enabled: boolean) => {
+    setAutoBackupEnabled(enabled);
+    setAutoBackupActive(enabled);
+    showToast(enabled ? "Daily auto-backup enabled" : "Daily auto-backup disabled", "info");
+    onLogAction('TOGGLE_AUTO_BACKUP', `Daily automated database backup ${enabled ? 'enabled' : 'disabled'}.`);
+  };
+
+  const handleManualBackup = async () => {
+    try {
+      showToast("Creating manual database backup in progress...", "info");
+      const backup = await createDatabaseBackup('manual');
+      setStoredBackups(getStoredBackups());
+      showToast(`Database backup created successfully: ${backup.filename}`, "success");
+      onLogAction('CREATE_MANUAL_BACKUP', `Manually triggered all-collections backup. Filename: ${backup.filename}. Saved in user's browser storage.`);
+    } catch (err: any) {
+      console.error(err);
+      showToast(`Failed to create manual backup: ${err.message || String(err)}`, "error");
+    }
+  };
+
+  const handleDeleteBackup = (id: string, filename: string) => {
+    deleteDatabaseBackup(id);
+    setStoredBackups(getStoredBackups());
+    showToast(`Deleted backup: ${filename}`, "info");
+    onLogAction('DELETE_BACKUP', `Deleted backup file from browser storage: ${filename}`);
+  };
+
+  const handleRestoreBackup = async (backup: DatabaseBackup) => {
+    try {
+      showToast("Restoring database from backup...", "info");
+      await DBService.restoreDatabaseDump(backup.data, currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+      showToast("Database successfully restored! Reloading system cache...", "success");
+      if (onRefreshJobs) onRefreshJobs();
+      if (onRefreshCompany) onRefreshCompany();
+      onLogAction('RESTORE_DATABASE', `Restored database collections to backup snapshot dated ${backup.timestamp}`);
+    } catch (err: any) {
+      console.error(err);
+      showToast(`Failed to restore database backup: ${err.message || String(err)}`, "error");
+    }
+  };
+
+  const handleDownloadFile = (backup: DatabaseBackup) => {
+    downloadBackupAsJsonFile(backup);
+    showToast(`Downloaded: ${backup.filename}`, "success");
+    onLogAction('DOWNLOAD_BACKUP_FILE', `Downloaded backup file: ${backup.filename}`);
+  };
 
   const [mountError, setMountError] = useState<string | null>(null);
   const [isInitializing, setIsInitializing] = useState(false);
@@ -259,7 +399,7 @@ export default function AdminConsole({
       async () => {
         try {
           for (const logId of selectedAuditLogIds) {
-            await DBService.deleteAuditLog(logId);
+            await DBService.deleteAuditLog(logId, currentUser?.userId || 'u-1');
           }
           onLogAction('BULK_DELETE_AUDIT_LOGS', `Bulk deleted ${selectedAuditLogIds.length} audit logs`);
           setSelectedAuditLogIds([]);
@@ -312,6 +452,16 @@ export default function AdminConsole({
       return;
     }
     if (selectedUserIds.length === 0) return;
+
+    if (newRole === 'admin') {
+      const nonSelectedAdmins = (users || []).filter(u => !selectedUserIds.includes(u.userId) && (u.role === 'admin' || u.department === 'Admin'));
+      const activeSelectedCount = selectedUserIds.length;
+      if (nonSelectedAdmins.length > 0 || activeSelectedCount > 1) {
+        const adminNames = nonSelectedAdmins.map(u => u.name).join(', ') || 'an existing admin';
+        showToast(`Only one Admin user profile is permitted for the company. '${adminNames}' is already registered as Admin.`, 'error');
+        return;
+      }
+    }
 
     showConfirm(
       "Bulk Update User Roles",
@@ -376,6 +526,17 @@ export default function AdminConsole({
 
     // Auto-generate a secure 4-digit PIN under the hood for backend compatibility
     const generatedPin = Math.floor(1000 + Math.random() * 9000).toString();
+
+    const isNewUserAdmin = newUserRole === 'admin' || newUserDept === 'Admin';
+    if (isNewUserAdmin) {
+      const existingAdmin = (users || []).find(u => u.role === 'admin' || u.department === 'Admin');
+      if (existingAdmin) {
+        const errorMsg = `Only one Admin user profile is permitted for the company. '${existingAdmin.name}' is already registered as Admin.`;
+        setPinError(errorMsg);
+        showToast(errorMsg, 'error');
+        return;
+      }
+    }
 
     const newProfile: UserProfile = {
       userId: `u-${Math.floor(Math.random() * 9000) + 1000}`,
@@ -561,6 +722,7 @@ export default function AdminConsole({
           <option value="audit">📄 Enterprise Audit Logs</option>
           <option value="settings">⚙️ Plant Configurations</option>
           <option value="jobs">📦 Job Cards Admin Database</option>
+          <option value="movements">🚚 Material Movements Admin</option>
           <option value="stock">📊 Store Stock Sheet</option>
           <option value="company">🏢 Company Profile</option>
         </select>
@@ -622,6 +784,17 @@ export default function AdminConsole({
         >
           <Database className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-rose-500" />
           Job Cards Admin Database
+        </button>
+        <button
+          onClick={() => { setActiveSubTab('movements'); setSearchTerm(''); }}
+          className={`flex items-center gap-1.5 px-4 py-2.5 sm:px-5 sm:py-3 text-xs sm:text-sm font-semibold border-[#E2E8F0] dark:border-slate-800 border-b-2 transition-all whitespace-nowrap shrink-0 ${
+            activeSubTab === 'movements'
+              ? 'border-[#3B82F6] text-[#3B82F6] font-bold'
+              : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
+          }`}
+        >
+          <TrendingUp className="h-3.5 w-3.5 sm:h-4 sm:w-4 text-amber-500" />
+          Material Movements Admin
         </button>
         <button
           onClick={() => { setActiveSubTab('stock'); setSearchTerm(''); }}
@@ -748,6 +921,7 @@ export default function AdminConsole({
               >
                 <option value="Admin">Admin Console</option>
                 <option value="Dispatch">Dispatch Line</option>
+                <option value="Purchase">Purchase Department</option>
                 <option value="Production">Production Milling</option>
                 <option value="Heat Treatment">Heat Treatment Line</option>
                 <option value="Plating">Surface Plating</option>
@@ -1129,7 +1303,7 @@ export default function AdminConsole({
                               "Are you sure you want to permanently delete this audit log? This action is irreversible!",
                               async () => {
                                 try {
-                                  await DBService.deleteAuditLog(l.id);
+                                  await DBService.deleteAuditLog(l.id, currentUser?.userId || 'u-1');
                                   showToast("Audit log successfully deleted.", "success");
                                   setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
                                   if (onRefreshJobs) onRefreshJobs();
@@ -1193,7 +1367,7 @@ export default function AdminConsole({
                             "Are you sure you want to permanently delete this audit log? This action is irreversible!",
                             async () => {
                               try {
-                                await DBService.deleteAuditLog(l.id);
+                                await DBService.deleteAuditLog(l.id, currentUser?.userId || 'u-1');
                                 showToast("Audit log successfully deleted.", "success");
                                 setSelectedAuditLogIds(prev => prev.filter(id => id !== l.id));
                                 if (onRefreshJobs) onRefreshJobs();
@@ -1222,72 +1396,267 @@ export default function AdminConsole({
 
       {/* RENDER SETTINGS PANEL */}
       {(activeSubTab === 'settings' || activeSubTab === 'all') && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
-            <h4 className="font-sans font-bold text-sm text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
-              <Warehouse className="h-5 w-5 text-[#3B82F6]" />
-              Multi-Plant System Setup
-            </h4>
-            
-            <p className="text-xs text-slate-500 leading-normal">
-              Toggle allocations across separate production campuses. Setting coordinates synchronizes ledger books across multiple physical sites.
-            </p>
+        <>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
+              <h4 className="font-sans font-bold text-sm text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                <Warehouse className="h-5 w-5 text-[#3B82F6]" />
+                Multi-Plant System Setup
+              </h4>
+              
+              <p className="text-xs text-slate-500 leading-normal">
+                Toggle allocations across separate production campuses. Setting coordinates synchronizes ledger books across multiple physical sites.
+              </p>
 
-            <div className="space-y-3.5 text-xs">
-              <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200/50">
-                <div>
-                  <div className="font-semibold text-slate-800 dark:text-slate-200">Camp #1 - Standard Line</div>
-                  <div className="text-[10px] text-slate-400">Main smelting and electroplating lines</div>
-                </div>
-                <span className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                  Online
-                </span>
-              </div>
-
-              <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200/50">
-                <div>
-                  <div className="font-semibold text-slate-800 dark:text-slate-200">Camp #2 - Heat Assembly</div>
-                  <div className="text-[10px] text-slate-400">Satellite hardening line located in Phase 2 block</div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
-                    Standby
+              <div className="space-y-3.5 text-xs">
+                <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200/50">
+                  <div>
+                    <div className="font-semibold text-slate-800 dark:text-slate-200">Camp #1 - Standard Line</div>
+                    <div className="text-[10px] text-slate-400">Main smelting and electroplating lines</div>
+                  </div>
+                  <span className="bg-emerald-100 text-emerald-800 dark:bg-emerald-950/40 dark:text-emerald-400 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                    Online
                   </span>
                 </div>
+
+                <div className="flex items-center justify-between p-3.5 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200/50">
+                  <div>
+                    <div className="font-semibold text-slate-800 dark:text-slate-200">Camp #2 - Heat Assembly</div>
+                    <div className="text-[10px] text-slate-400">Satellite hardening line located in Phase 2 block</div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="bg-amber-100 text-amber-800 text-[10px] font-bold px-2 py-0.5 rounded-full">
+                      Standby
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
+              <h4 className="font-sans font-bold text-sm text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                <Activity className="h-5 w-5 text-indigo-500" />
+                Firestore Stream Sync Engine
+              </h4>
+
+              <p className="text-xs text-slate-500 leading-normal">
+                When Firebase applet credentials are fully loaded, real-time sync is enabled. Adjust active websocket timeouts below:
+              </p>
+
+              <div className="space-y-4 text-xs font-mono">
+                <div>
+                  <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Listener Stream Timeout</label>
+                  <input 
+                    type="number" 
+                    defaultValue={30} 
+                    className="bg-slate-50 dark:bg-slate-850 rounded border border-slate-200 dark:border-slate-750 p-2 text-slate-700 dark:text-slate-200 w-full"
+                  />
+                  <span className="text-[9px] text-slate-400">Minutes before websocket connection refresh</span>
+                </div>
+                
+                <div className="p-3 bg-indigo-50/50 dark:bg-slate-850 rounded-lg flex items-start gap-2 text-[11px] text-slate-500 dark:text-slate-200">
+                  <ShieldAlert className="h-4 w-4 text-indigo-500 shrink-0 mt-0.5" />
+                  <p className="leading-tight font-sans">
+                    The current build incorporates live updates using local storage custom triggers as fallback, guaranteeing immediate reactive views for development evaluation.
+                  </p>
+                </div>
               </div>
             </div>
           </div>
 
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm">
-            <h4 className="font-sans font-bold text-sm text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
-              <Activity className="h-5 w-5 text-indigo-500" />
-              Firestore Stream Sync Engine
-            </h4>
-
-            <p className="text-xs text-slate-500 leading-normal">
-              When Firebase applet credentials are fully loaded, real-time sync is enabled. Adjust active websocket timeouts below:
-            </p>
-
-            <div className="space-y-4 text-xs font-mono">
+          {/* AUTO-BACKUP CONTROLS CARD */}
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-4 shadow-sm mt-6">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border-b border-slate-100 dark:border-slate-800 pb-4">
               <div>
-                <label className="block text-slate-400 text-[10px] uppercase font-bold mb-1">Listener Stream Timeout</label>
-                <input 
-                  type="number" 
-                  defaultValue={30} 
-                  className="bg-slate-50 dark:bg-slate-850 rounded border border-slate-200 dark:border-slate-750 p-2 text-slate-700 dark:text-slate-200 w-full"
-                />
-                <span className="text-[9px] text-slate-400">Minutes before websocket connection refresh</span>
-              </div>
-              
-              <div className="p-3 bg-indigo-50/50 dark:bg-slate-850 rounded-lg flex items-start gap-2 text-[11px] text-slate-500 dark:text-slate-200">
-                <ShieldAlert className="h-4 w-4 text-indigo-500 shrink-0 mt-0.5" />
-                <p className="leading-tight font-sans">
-                  The current build incorporates live updates using local storage custom triggers as fallback, guaranteeing immediate reactive views for development evaluation.
+                <h4 className="font-sans font-bold text-sm text-slate-800 dark:text-slate-200 uppercase tracking-wider flex items-center gap-2">
+                  <Database className="h-5 w-5 text-amber-500" />
+                  Daily Auto-Backup & System Recovery
+                </h4>
+                <p className="text-xs text-slate-500 leading-normal mt-1">
+                  Configure automated database snapshots. Backups are stored safely in your browser storage and can be manually downloaded or restored.
                 </p>
               </div>
+
+              <div className="flex items-center gap-3 bg-slate-50 dark:bg-slate-950 p-2 rounded-xl border border-slate-200/60 dark:border-slate-850 shrink-0">
+                <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">Daily Auto-Backup:</span>
+                <button
+                  type="button"
+                  onClick={() => handleToggleAutoBackup(!autoBackupActive)}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none cursor-pointer ${
+                    autoBackupActive ? 'bg-amber-500' : 'bg-slate-300 dark:bg-slate-750'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                      autoBackupActive ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-50 dark:bg-slate-950 p-4 rounded-xl border border-slate-200/50 dark:border-slate-850/60">
+              <div className="space-y-1">
+                <h5 className="text-xs font-bold text-slate-800 dark:text-slate-200">Manual Database Backup & Download</h5>
+                <p className="text-[10px] text-slate-400 dark:text-slate-500 leading-relaxed">
+                  Trigger an instantaneous snapshot of all database collections as a single JSON payload. This will instantly store the backup in your browser and provide a download file.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap gap-2.5 w-full sm:w-auto shrink-0">
+                <button
+                  type="button"
+                  onClick={handleManualBackup}
+                  className="w-full sm:w-auto flex items-center justify-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white font-sans font-bold text-xs py-2.5 px-4 rounded-xl shadow-sm transition cursor-pointer"
+                >
+                  <Database className="h-3.5 w-3.5" />
+                  Trigger Manual Backup
+                </button>
+              </div>
+            </div>
+
+            {/* Backups list */}
+            <div className="space-y-3 pt-2">
+              <h5 className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                Saved Backup Ledger ({storedBackups.length})
+              </h5>
+
+              {storedBackups.length === 0 ? (
+                <div className="text-center p-6 bg-slate-50/50 dark:bg-slate-950/20 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-slate-400 italic text-xs font-mono">
+                  No snapshots currently registered in browser storage.
+                </div>
+              ) : (
+                <div className="overflow-x-auto border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50/75 dark:bg-slate-950/75 text-[10px] text-slate-400 uppercase tracking-widest font-mono border-b border-slate-200 dark:border-slate-800">
+                        <th className="py-2.5 px-4 font-bold">Snapshot Filename</th>
+                        <th className="py-2.5 px-4 font-bold">Timestamp</th>
+                        <th className="py-2.5 px-4 font-bold">Size</th>
+                        <th className="py-2.5 px-4 font-bold">Backup Type</th>
+                        <th className="py-2.5 px-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60">
+                      {storedBackups.map((backup) => (
+                        <tr key={backup.id} className="hover:bg-slate-50/50 dark:hover:bg-slate-950/20 transition-all">
+                          <td className="py-2.5 px-4 font-mono font-semibold text-slate-800 dark:text-slate-200">
+                            {backup.filename}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-500 dark:text-slate-400 font-mono">
+                            {new Date(backup.timestamp).toLocaleString()}
+                          </td>
+                          <td className="py-2.5 px-4 text-slate-600 dark:text-slate-300 font-mono">
+                            {(backup.size / 1024).toFixed(2)} KB
+                          </td>
+                          <td className="py-2.5 px-4">
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              backup.type === 'auto'
+                                ? 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-750 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-900/40'
+                                : 'bg-amber-50 dark:bg-amber-950/40 text-amber-750 dark:text-amber-400 border border-amber-100 dark:border-amber-900/40'
+                            }`}>
+                              {backup.type === 'auto' ? 'Automated' : 'Manual'}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-4 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => handleDownloadFile(backup)}
+                                className="text-[10px] text-emerald-600 dark:text-emerald-400 p-1.5 rounded bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                title="Download JSON file"
+                              >
+                                <Download className="h-3 w-3" />
+                                Download
+                              </button>
+                              <button
+                                onClick={() => {
+                                  showConfirm(
+                                    "Confirm Database Restore",
+                                    `Are you sure you want to restore the database to backup snapshot ${backup.filename}? This will OVERWRITE your current live database. This step is irreversible.`,
+                                    () => handleRestoreBackup(backup),
+                                    "Restore Database",
+                                    "Cancel"
+                                  );
+                                }}
+                                className="text-[10px] text-indigo-600 dark:text-indigo-400 p-1.5 rounded bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                title="Restore database to this point"
+                              >
+                                <RotateCcw className="h-3 w-3" />
+                                Restore
+                              </button>
+                              <button
+                                onClick={() => {
+                                  showConfirm(
+                                    "Delete Backup Snapshot",
+                                    `Are you sure you want to delete backup snapshot ${backup.filename} from your browser?`,
+                                    () => handleDeleteBackup(backup.id, backup.filename),
+                                    "Delete",
+                                    "Cancel"
+                                  );
+                                }}
+                                className="text-[10px] text-red-600 dark:text-red-400 p-1.5 rounded bg-red-50 hover:bg-red-100 dark:bg-red-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                title="Delete backup snapshot"
+                              >
+                                <Trash2 className="h-3 w-3" />
+                                Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
-        </div>
+
+          {/* SYSTEM RECOVERY DANGER ZONE */}
+          <div className="bg-rose-50/40 dark:bg-rose-950/5 border border-rose-150 dark:border-rose-900/20 rounded-2xl p-6 space-y-4 shadow-sm mt-6">
+            <h4 className="font-sans font-bold text-sm text-rose-800 dark:text-rose-400 uppercase tracking-wider flex items-center gap-2">
+              <RotateCcw className="h-5 w-5 text-rose-600 animate-pulse" />
+              Administrative Danger Zone
+            </h4>
+
+            <p className="text-xs text-slate-500 dark:text-slate-400 leading-normal">
+              Perform a global factory reset. This action will clear all live data (including custom job cards, material movements, user accounts, and notifications) and restore the system to its initial pristine pre-seeded demonstration data state.
+            </p>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-rose-100/40 dark:border-rose-900/10">
+              <div className="space-y-1">
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200">Reset System to Pre-Seeded Default State</span>
+                <p className="text-[10px] text-slate-400 dark:text-slate-500">Reinitializes Firestore and local storage using initial default factory datasets.</p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  showConfirm(
+                    "CRITICAL CONFIRMATION: Factory Reset System",
+                    "Are you sure you want to trigger a FULL SYSTEM RESET? This will permanently wipe all active job cards, custom material movements, notifications, audit logs, and user profiles, restoring everything to the default demo seed state.\n\nTo confirm, type FACTORY RESET below:",
+                    async () => {
+                      try {
+                        await DBService.factoryReset(currentUser?.userId || 'u-1', currentUser?.name || 'Pawan Kumar');
+                        showToast("System factory reset completed successfully! Re-seeded initial default datasets.", "success");
+                        if (onRefreshJobs) onRefreshJobs();
+                      } catch (err: any) {
+                        console.error("Factory Reset failed", err);
+                        showToast(`Factory Reset failed: ${err.message || String(err)}`, "error");
+                      }
+                    },
+                    "Reset System",
+                    "Cancel",
+                    "FACTORY_RESET"
+                  );
+                }}
+                className="w-full sm:w-auto flex items-center justify-center gap-1.5 bg-rose-600 hover:bg-rose-700 text-white font-sans font-bold text-xs py-2.5 px-4 rounded-xl shadow-sm transition border border-rose-750 cursor-pointer"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Factory Reset Database
+              </button>
+            </div>
+          </div>
+        </>
       )}
 
       {/* RENDER JOBS MANAGEMENT PANEL */}
@@ -1301,7 +1670,44 @@ export default function AdminConsole({
               <p className="text-[11px] text-slate-400 italic">Manage, search, or administratively remove individual manufacturing runs.</p>
             </div>
             <div className="text-[10px] font-mono text-slate-500 bg-slate-100 dark:bg-slate-800 p-1.5 rounded border border-slate-200 dark:border-slate-700">
-              Total Recorded Lines: <strong>{jobCards.length}</strong>
+              Total Recorded Lines: <strong>{jobCards.length.toLocaleString()}</strong>
+            </div>
+          </div>
+
+          {/* HIGH-SCALE LOAD TESTING WIDGET */}
+          <div className="bg-slate-50 dark:bg-slate-950/40 p-4 border-b border-slate-100 dark:border-slate-800 flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+            <div className="flex-1">
+              <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 dark:bg-indigo-950/60 text-indigo-800 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-900 mb-1.5 animate-pulse">
+                ⚡ Enterprise Scalability Tool
+              </span>
+              <h5 className="font-sans font-extrabold text-xs text-slate-800 dark:text-slate-200 uppercase tracking-wide flex items-center gap-1">
+                High-Speed Load Test (100,000 Entries)
+              </h5>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-normal mt-0.5 max-w-2xl">
+                Writing 100,000 real documents to standard Firestore exceeds Spark Plan limits (<strong>20,000 writes/day</strong>). 
+                Use this high-speed local memory injector to load <strong>100,000 active Job Cards</strong> in-memory instantly to test live search, filtering, and sorting speeds under maximum scale.
+              </p>
+            </div>
+            <div className="flex gap-2 shrink-0 w-full md:w-auto">
+              <button
+                type="button"
+                onClick={handleGenerate100kSimulated}
+                disabled={isGenerating100k}
+                className="w-full md:w-auto bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-sans font-bold text-xs py-2 px-3.5 rounded-lg shadow-sm transition border border-indigo-700 cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <Activity className="h-3.5 w-3.5" />
+                {isGenerating100k ? 'Injecting...' : 'Inject 100,000 Cards'}
+              </button>
+              {jobCards.length > 200 && (
+                <button
+                  type="button"
+                  onClick={handleResetToOriginal}
+                  className="w-full md:w-auto bg-slate-200 dark:bg-slate-850 hover:bg-slate-300 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-300 font-sans font-bold text-xs py-2 px-3 rounded-lg transition border border-slate-300 dark:border-slate-750 cursor-pointer flex items-center justify-center gap-1"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" />
+                  Reset
+                </button>
+              )}
             </div>
           </div>
           
@@ -1388,6 +1794,7 @@ export default function AdminConsole({
                           j.partyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
                           j.itemName.toLowerCase().includes(searchTerm.toLowerCase())
                         )
+                        .slice(0, 100)
                         .map(j => (
                           <tr key={j.jobCardNo} className="hover:bg-slate-50/50 dark:hover:bg-slate-850/25">
                             <td className="py-3 px-4 text-center w-12">
@@ -1455,6 +1862,7 @@ export default function AdminConsole({
                       j.partyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
                       j.itemName.toLowerCase().includes(searchTerm.toLowerCase())
                     )
+                    .slice(0, 100)
                     .map(j => (
                       <div key={j.jobCardNo} className="p-4 space-y-3.5">
                         <div className="flex items-center justify-between gap-2">
@@ -1523,6 +1931,369 @@ export default function AdminConsole({
                         </div>
                       </div>
                     ))}
+                </div>
+
+                {/* Slicing / Pagination Warning notice */}
+                {jobCards.filter(j => 
+                  j.jobCardNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                  j.partyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                  j.itemName.toLowerCase().includes(searchTerm.toLowerCase())
+                ).length > 100 && (
+                  <div className="p-3 bg-slate-50 dark:bg-slate-950/60 border-t border-slate-150 dark:border-slate-800 text-slate-500 dark:text-slate-400 text-[11px] flex flex-col sm:flex-row justify-between items-center gap-1.5 font-sans">
+                    <span>
+                      Showing first <strong>100</strong> rows of <strong>{jobCards.filter(j => 
+                        j.jobCardNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        j.partyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                        j.itemName.toLowerCase().includes(searchTerm.toLowerCase())
+                      ).length.toLocaleString()}</strong> matching entries.
+                    </span>
+                    <span className="font-semibold text-indigo-500 font-mono text-[10px] uppercase tracking-wide bg-indigo-50 dark:bg-indigo-950/40 px-2 py-0.5 rounded border border-indigo-150 dark:border-indigo-900/40">
+                      Virtualized Rendering Active
+                    </span>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* RENDER MATERIAL MOVEMENTS ADMIN PANEL */}
+      {(activeSubTab === 'movements' || activeSubTab === 'all') && (
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+          <div className="p-4 border-b border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2">
+            <div>
+              <h4 className="font-sans font-bold text-sm text-slate-800 dark:text-slate-100 uppercase tracking-wide flex items-center gap-1.5">
+                <TrendingUp className="h-4 w-4 text-amber-500" />
+                Material Movements Admin Ledger
+              </h4>
+              <p className="text-[11px] text-slate-400 italic">Administratively monitor, modify, or delete specific department-to-department transit records.</p>
+            </div>
+            <div className="text-[10px] font-mono text-slate-500 bg-slate-100 dark:bg-slate-800 p-1.5 rounded border border-slate-200 dark:border-slate-700">
+              Total Recorded Movements: <strong>{movements.length.toLocaleString()}</strong>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            {movements.filter(m => 
+              m.jobCardNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
+              m.transferBy.toLowerCase().includes(searchTerm.toLowerCase()) ||
+              m.fromDepartment.toLowerCase().includes(searchTerm.toLowerCase()) ||
+              m.toDepartment.toLowerCase().includes(searchTerm.toLowerCase()) ||
+              (m.accepted ? 'accepted' : 'pending').includes(searchTerm.toLowerCase())
+            ).length === 0 ? (
+              <div className="text-center p-12 space-y-1.5">
+                <span className="text-2xl">🔍</span>
+                <p className="text-xs font-semibold text-slate-400 font-mono">No material movements match query parameters</p>
+              </div>
+            ) : (
+              <>
+                {/* Desktop View Table */}
+                <div className="hidden md:block">
+                  <table className="w-full text-left border-collapse text-xs">
+                    <thead>
+                      <tr className="bg-slate-50/75 dark:bg-slate-950/75 text-[10px] text-slate-400 uppercase tracking-widest font-mono border-b border-slate-200 dark:border-slate-800">
+                        <th className="py-3 px-4 font-bold">Movement ID</th>
+                        <th className="py-3 px-4 font-bold">Job Card No</th>
+                        <th className="py-3 px-4 font-bold">Transfer Routing</th>
+                        <th className="py-3 px-4 font-bold">Quantity (KG)</th>
+                        <th className="py-3 px-4 font-bold">Transit Status</th>
+                        <th className="py-3 px-4 font-bold">Initiated By / Date</th>
+                        <th className="py-3 px-4 font-bold">Action History</th>
+                        <th className="py-3 px-4 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800/60">
+                      {movements
+                        .filter(m => 
+                          m.jobCardNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          m.transferBy.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          m.fromDepartment.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          m.toDepartment.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                          (m.accepted ? 'accepted' : 'pending').includes(searchTerm.toLowerCase())
+                        )
+                        .slice(0, 100)
+                        .map((m) => {
+                          const isEditing = editingMovementId === m.movementId;
+                          return (
+                            <tr key={m.movementId} className="hover:bg-slate-50/50 dark:hover:bg-slate-950/20 transition-all">
+                              <td className="py-3.5 px-4 font-mono font-bold text-slate-800 dark:text-slate-200">
+                                {m.movementId}
+                              </td>
+                              <td className="py-3.5 px-4 font-semibold text-[#3B82F6] hover:underline cursor-pointer">
+                                {m.jobCardNo}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <div className="flex items-center gap-1.5 text-slate-700 dark:text-slate-300">
+                                  <span className="font-medium">{m.fromDepartment}</span>
+                                  <span className="text-slate-400">➔</span>
+                                  <span className="font-semibold text-slate-900 dark:text-slate-100">{m.toDepartment}</span>
+                                </div>
+                              </td>
+                              <td className="py-3.5 px-4">
+                                {isEditing ? (
+                                  <input
+                                    type="number"
+                                    value={editMovementQty}
+                                    onChange={(e) => setEditMovementQty(Number(e.target.value))}
+                                    className="w-20 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-1.5 py-1 text-xs font-bold text-slate-800 dark:text-slate-100 focus:outline-none focus:border-[#3B82F6]"
+                                  />
+                                ) : (
+                                  <span className="font-mono font-bold text-slate-900 dark:text-slate-100">
+                                    {m.quantity.toLocaleString()} KG
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3.5 px-4">
+                                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  m.accepted
+                                    ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-750 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/40'
+                                    : 'bg-amber-50 dark:bg-amber-950/40 text-amber-750 dark:text-amber-400 border border-amber-100 dark:border-amber-900/40'
+                                }`}>
+                                  <span className={`h-1.5 w-1.5 rounded-full ${m.accepted ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+                                  {m.accepted ? 'Accepted' : 'In Transit (Pending)'}
+                                </span>
+                              </td>
+                              <td className="py-3.5 px-4 text-slate-500 dark:text-slate-400">
+                                <div className="font-medium text-slate-800 dark:text-slate-200">{m.transferBy}</div>
+                                <div className="text-[10px] font-mono text-slate-400 mt-0.5">{new Date(m.transferDate).toLocaleString()}</div>
+                              </td>
+                              <td className="py-3.5 px-4 text-slate-500 dark:text-slate-400 space-y-1">
+                                {m.initiatedByUserName && (
+                                  <div className="text-[10px] font-medium leading-tight">
+                                    <span className="text-slate-400">Initiated by:</span> <strong className="text-slate-700 dark:text-slate-300">{m.initiatedByUserName}</strong>
+                                  </div>
+                                )}
+                                {m.acceptedBy && (
+                                  <div className="text-[10px] font-medium leading-tight">
+                                    <span className="text-emerald-550 font-bold">Accepted by:</span> <strong className="text-emerald-700 dark:text-emerald-300">{m.acceptedBy}</strong>
+                                    {m.acceptedDate && <span className="text-slate-400 font-mono text-[9px] block">{new Date(m.acceptedDate).toLocaleString()}</span>}
+                                  </div>
+                                )}
+                                {m.modifiedByUserName && (
+                                  <div className="text-[10px] font-medium leading-tight">
+                                    <span className="text-indigo-500 font-bold">Last Modified ({m.modifiedAction}):</span> <strong className="text-indigo-700 dark:text-indigo-300">{m.modifiedByUserName}</strong>
+                                    {m.modifiedDate && <span className="text-slate-400 font-mono text-[9px] block">{new Date(m.modifiedDate).toLocaleString()}</span>}
+                                  </div>
+                                )}
+                                {m.remarks && (
+                                  <div className="text-[10px] italic text-slate-400 max-w-[180px] truncate leading-tight">
+                                    "{m.remarks}"
+                                  </div>
+                                )}
+                                {isEditing && (
+                                  <div className="mt-1">
+                                    <input
+                                      type="text"
+                                      placeholder="Remarks/Audit notes..."
+                                      value={editMovementRemarks}
+                                      onChange={(e) => setEditMovementRemarks(e.target.value)}
+                                      className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-1.5 py-1 text-[10px] text-slate-800 dark:text-slate-100 focus:outline-none"
+                                    />
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-3.5 px-4 text-right">
+                                <div className="flex items-center justify-end gap-2">
+                                  {isEditing ? (
+                                    <>
+                                      <button
+                                        onClick={async () => {
+                                          if (!onUpdateMovement) return;
+                                          try {
+                                            await onUpdateMovement(m.movementId, editMovementQty, editMovementRemarks);
+                                            setEditingMovementId(null);
+                                          } catch (err) {
+                                            console.error(err);
+                                          }
+                                        }}
+                                        className="text-[10px] text-white bg-indigo-600 hover:bg-indigo-500 px-2 py-1 rounded font-bold transition-all cursor-pointer"
+                                      >
+                                        Save
+                                      </button>
+                                      <button
+                                        onClick={() => setEditingMovementId(null)}
+                                        className="text-[10px] text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 px-2 py-1 rounded font-bold transition-all cursor-pointer"
+                                      >
+                                        Cancel
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <button
+                                        onClick={() => {
+                                          setEditingMovementId(m.movementId);
+                                          setEditMovementQty(m.quantity);
+                                          setEditMovementRemarks(m.remarks || '');
+                                        }}
+                                        className="text-[10px] text-indigo-600 dark:text-indigo-400 p-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Edit className="h-3.5 w-3.5" />
+                                        Modify
+                                      </button>
+                                      <button
+                                        onClick={() => {
+                                          showConfirm(
+                                            "Confirm Movement Deletion",
+                                            `Are you sure you want to delete material movement ${m.movementId}? This action will wipe this transit record and is logged in the Enterprise Audit Logs.`,
+                                            async () => {
+                                              if (onDeleteMovement) {
+                                                await onDeleteMovement(m.movementId);
+                                              }
+                                            },
+                                            "Wipe Movement",
+                                            "Cancel"
+                                          );
+                                        }}
+                                        className="text-[10px] text-red-600 dark:text-red-400 p-1.5 rounded-lg bg-red-50 hover:bg-red-100 dark:bg-red-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <Trash2 className="h-3.5 w-3.5" />
+                                        Wipe
+                                      </button>
+                                    </>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Mobile View Cards */}
+                <div className="block md:hidden divide-y divide-slate-150 dark:divide-slate-800">
+                  {movements
+                    .filter(m => 
+                      m.jobCardNo.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                      m.transferBy.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                      m.fromDepartment.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                      m.toDepartment.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                      (m.accepted ? 'accepted' : 'pending').includes(searchTerm.toLowerCase())
+                    )
+                    .slice(0, 100)
+                    .map((m) => {
+                      const isEditing = editingMovementId === m.movementId;
+                      return (
+                        <div key={m.movementId} className="p-4 space-y-3 bg-white dark:bg-slate-900">
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <span className="font-mono font-bold text-xs text-slate-800 dark:text-slate-200">
+                                {m.movementId}
+                              </span>
+                              <h5 className="font-bold text-sm text-[#3B82F6] hover:underline cursor-pointer mt-0.5">
+                                {m.jobCardNo}
+                              </h5>
+                            </div>
+                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              m.accepted
+                                ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-750 dark:text-emerald-400 border border-emerald-100 dark:border-emerald-900/40'
+                                : 'bg-amber-50 dark:bg-amber-950/40 text-amber-750 dark:text-amber-400 border border-amber-100 dark:border-amber-900/40'
+                            }`}>
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                              {m.accepted ? 'Accepted' : 'Pending'}
+                            </span>
+                          </div>
+
+                          <div className="text-xs text-slate-600 dark:text-slate-400 space-y-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-slate-500">Routing:</span>
+                              <span className="font-medium text-slate-800 dark:text-slate-200">{m.fromDepartment}➔{m.toDepartment}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-semibold text-slate-500">Weight:</span>
+                              {isEditing ? (
+                                <input
+                                  type="number"
+                                  value={editMovementQty}
+                                  onChange={(e) => setEditMovementQty(Number(e.target.value))}
+                                  className="w-20 bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-1.5 py-1 text-xs font-bold text-slate-800 dark:text-slate-100 focus:outline-none"
+                                />
+                              ) : (
+                                <span className="font-mono font-bold text-slate-850 dark:text-slate-100">{m.quantity.toLocaleString()} KG</span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-slate-400 leading-normal pt-1 border-t border-slate-100 dark:border-slate-800/60">
+                              {m.initiatedByUserName && <div>Initiator: {m.initiatedByUserName} ({new Date(m.transferDate).toLocaleDateString()})</div>}
+                              {m.acceptedBy && <div>Accepted by: {m.acceptedBy} {m.acceptedDate && `(${new Date(m.acceptedDate).toLocaleDateString()})`}</div>}
+                              {m.modifiedByUserName && <div>Modified: {m.modifiedByUserName} ({m.modifiedAction})</div>}
+                              {m.remarks && <div className="italic mt-0.5">"{m.remarks}"</div>}
+                            </div>
+                            {isEditing && (
+                              <div className="mt-2">
+                                <input
+                                  type="text"
+                                  placeholder="Remarks/Audit notes..."
+                                  value={editMovementRemarks}
+                                  onChange={(e) => setEditMovementRemarks(e.target.value)}
+                                  className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 rounded px-1.5 py-1 text-[10px] text-slate-800 dark:text-slate-100 focus:outline-none"
+                                />
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800/60">
+                            {isEditing ? (
+                              <>
+                                <button
+                                  onClick={async () => {
+                                    if (!onUpdateMovement) return;
+                                    try {
+                                      await onUpdateMovement(m.movementId, editMovementQty, editMovementRemarks);
+                                      setEditingMovementId(null);
+                                    } catch (err) {
+                                      console.error(err);
+                                    }
+                                  }}
+                                  className="text-[10px] text-white bg-indigo-600 hover:bg-indigo-505 px-2 py-1 rounded font-bold transition-all cursor-pointer"
+                                >
+                                  Save
+                                </button>
+                                <button
+                                  onClick={() => setEditingMovementId(null)}
+                                  className="text-[10px] text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 px-2 py-1 rounded font-bold transition-all cursor-pointer"
+                                >
+                                  Cancel
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    setEditingMovementId(m.movementId);
+                                    setEditMovementQty(m.quantity);
+                                    setEditMovementRemarks(m.remarks || '');
+                                  }}
+                                  className="text-[10px] text-indigo-600 dark:text-indigo-400 p-1.5 rounded-lg bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Edit className="h-3.5 w-3.5" />
+                                  Modify
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    showConfirm(
+                                      "Confirm Movement Deletion",
+                                      `Are you sure you want to delete material movement ${m.movementId}? This action will wipe this transit record and is logged in the Enterprise Audit Logs.`,
+                                      async () => {
+                                        if (onDeleteMovement) {
+                                          await onDeleteMovement(m.movementId);
+                                        }
+                                      },
+                                      "Wipe Movement",
+                                      "Cancel"
+                                    );
+                                  }}
+                                  className="text-[10px] text-red-600 dark:text-red-400 p-1.5 rounded-lg bg-red-50 hover:bg-red-100 dark:bg-red-950/20 font-bold transition-all flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  Wipe
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                 </div>
               </>
             )}
@@ -1880,15 +2651,11 @@ export default function AdminConsole({
                 <span className="block text-[10px] uppercase font-bold tracking-wider text-slate-400">Verification Phrase Needed</span>
                 <input
                   type="text"
+                  value={verificationInput}
                   placeholder={`Type "${confirmDialog.requireText}"`}
                   className="w-full bg-slate-50 dark:bg-slate-850 border border-slate-200 dark:border-slate-700 rounded-xl p-2.5 text-xs font-bold font-mono uppercase focus:outline-none focus:ring-1 focus:ring-red-550"
                   id="confirm_verification_input"
-                  onChange={(e) => {
-                    const el = document.getElementById("btn_confirm_modal_submit") as HTMLButtonElement | null;
-                    if (el) {
-                      el.disabled = e.target.value !== confirmDialog.requireText;
-                    }
-                  }}
+                  onChange={(e) => setVerificationInput(e.target.value)}
                 />
               </div>
             )}
@@ -1896,7 +2663,10 @@ export default function AdminConsole({
             <div className="flex justify-end gap-3 mt-6 text-xs font-semibold">
               <button
                 type="button"
-                onClick={() => setConfirmDialog(null)}
+                onClick={() => {
+                  setConfirmDialog(null);
+                  setVerificationInput('');
+                }}
                 className="px-4 py-2.5 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-800 rounded-xl transition cursor-pointer"
               >
                 {confirmDialog.cancelText || 'Cancel'}
@@ -1904,10 +2674,11 @@ export default function AdminConsole({
               <button
                 type="button"
                 id="btn_confirm_modal_submit"
-                disabled={!!confirmDialog.requireText}
+                disabled={confirmDialog.requireText ? verificationInput.trim().toUpperCase() !== confirmDialog.requireText.trim().toUpperCase() : false}
                 onClick={async () => {
                   const onConf = confirmDialog.onConfirm;
                   setConfirmDialog(null);
+                  setVerificationInput('');
                   await onConf();
                 }}
                 className="px-5 py-2.5 bg-red-650 hover:bg-red-750 disabled:opacity-30 disabled:hover:bg-red-650 text-white rounded-xl transition shadow-sm cursor-pointer"

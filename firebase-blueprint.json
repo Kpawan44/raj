@@ -53,7 +53,9 @@
         "accepted": { "type": "boolean" },
         "acceptedBy": { "type": "string" },
         "acceptedDate": { "type": "string", "format": "date-time" },
-        "remarks": { "type": "string" }
+        "remarks": { "type": "string" },
+        "allottedLocation": { "type": "string" },
+        "rackNo": { "type": "string" }
       },
       "required": ["movementId", "jobCardNo", "fromDepartment", "toDepartment", "quantity", "transferBy", "transferDate", "accepted"]
     },

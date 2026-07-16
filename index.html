@@ -3,7 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>My Google AI Studio App</title>
+    <meta name="theme-color" content="#3b82f6" />
+    <link rel="manifest" href="/manifest.json" />
+    <link rel="apple-touch-icon" href="/pwa_icon.jpg" />
+    <title>Precision Metal Works Manufacturing Tracker</title>
+    <script>
+      // Clear service workers and caches to prevent stale white screens in preview environment
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then((registrations) => {
+          for (const registration of registrations) {
+            registration.unregister().then(() => {
+              console.log('[PWA] Service Worker unregistered to prevent stale cache bugs.');
+            });
+          }
+        });
+      }
+      if ('caches' in window) {
+        caches.keys().then((keys) => {
+          keys.forEach((key) => {
+            caches.delete(key).then(() => {
+              console.log('[PWA] Cache storage cleared:', key);
+            });
+          });
+        });
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
